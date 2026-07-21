@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ur7e-vla-runtime"
+version = "0.1.0"
+description = "Local UR7e/Pika/RealSense runtime for a remote OpenPI policy server"
+requires-python = ">=3.9"
+dependencies = [
+  "numpy>=1.24,<2.0",
+  "opencv-python>=4.8",
+  "PyYAML>=6.0",
+  "pyrealsense2>=2.55",
+  "ur-rtde>=1.6",
+]
+
+[project.scripts]
+ur7e-vla = "ur7e_vla.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+demo = ["lerobot==0.3.3", "agx-pypika==0.1.1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

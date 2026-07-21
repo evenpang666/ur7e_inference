@@ -1,0 +1,2 @@
+[console_scripts]
+ur7e-vla = ur7e_vla.cli:main

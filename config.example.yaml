@@ -1,0 +1,96 @@
+policy:
+  host: "192.168.124.15"
+  port: 8000
+  # Exact keys consumed by Sci-VLA ur_policy.py / mani_real_pi05.
+  exterior_image_key: "observation/image"
+  wrist_image_key: "observation/wrist_image"
+  joint_state_key: "observation/joints"
+  gripper_state_key: "observation/gripper"
+  image_size: 224
+  action_dim: 7                 # 6 absolute UR joints + 1 absolute gripper
+  execute_steps_per_inference: 10
+  max_inference_latency_s: 2.0 # reject a stale action chunk
+
+robot:
+  ip: "169.254.175.10"
+  control_hz: 15.0              # confirmed mani_real dataset FPS
+  action_mode: "joint_position" # mani_real_pi05 server returns absolute joints
+  action_joint_indices: [0, 1, 2, 3, 4, 5]
+  joint_state_size: 6
+  joint_delta_scale: 1.0
+  max_joint_step_rad: 0.02
+  max_joint_speed_rad_s: 0.30
+  servo_lookahead_s: 0.10
+  servo_gain: 300
+  # Replace with limits validated for your cell before --execute.
+  joint_min_rad: [-6.283, -6.283, -3.142, -6.283, -6.283, -6.283]
+  joint_max_rad: [ 6.283,  6.283,  3.142,  6.283,  6.283,  6.283]
+
+cameras:
+  realsense_serial: null        # null selects the first D435i; set serial if several are connected
+  realsense_width: 640
+  realsense_height: 480
+  realsense_fps: 30
+  # Set this for a Pika-mounted RealSense (the detected device is a D405).
+  # When null, wrist_device is read as a generic UVC/OpenCV camera.
+  wrist_realsense_serial: null
+  wrist_device: 0              # Linux may use /dev/videoX; find it with: ur7e-vla list-cameras
+  wrist_width: 640
+  wrist_height: 480
+  wrist_fps: 30
+  max_frame_age_s: 0.5        # stale images stop the loop instead of moving blind
+
+gripper:
+  enabled: true
+  serial_port: "/dev/ttyUSB1"
+  action_index: 6
+  policy_min: 0.0              # confirmed raw mani_real gripper range
+  policy_max: 1.0
+  min_angle_rad: 0.0
+  max_angle_rad: 1.0
+  invert: false
+
+initial_state:
+  enabled: false              # true restores task state before the first inference
+  path: "initial_robot_states.json"
+  episode: null               # null selects the state nearest to the current joints
+  interpolation_hz: 50.0
+  max_joint_speed_rad_s: 0.15
+  max_gripper_speed_per_s: 0.25
+  joint_tolerance_rad: 0.03
+  settle_s: 0.25
+
+runtime:
+  task: "pick up the object"
+  duration_s: null             # null = unlimited; can be overridden with --duration
+  log_every_n_actions: 20
+  record_video: false          # true records exterior | wrist to one MP4
+  recording_fps: 30.0
+  recording_dir: "recordings"
+
+demo:
+  # Search every nested LeRobot dataset below this directory for the task.
+  # A missing task creates <root>/<normalized_task>/ as a new v2.1 dataset.
+  root: "~/.cache/huggingface/lerobot/mani_real"
+  repo_id: "mani_real"
+  staging_dir: "demo_staging"  # replay is staged here until Save Episode is clicked
+  fps: 15
+  image_width: 256
+  image_height: 256
+  use_videos: true
+  pika_sense_port: "COM6"
+  tracker_device: null          # null selects the first tracked device
+  tracker_backend: "pysurvive"
+  tracker_start_timeout_s: 30.0 # wait for OOTX/global Lighthouse solve
+  max_tracker_age_s: 0.25
+  gripper_distance_min_mm: 0.0
+  gripper_distance_max_mm: 85.0
+  gripper_invert: false
+  translation_scale: 1.0
+  rotation_scale: 1.0
+  max_translation_m: 0.50
+  max_rotation_rad: 3.142
+  max_ik_joint_step_rad: 0.02
+  max_gripper_step: 0.10
+  ik_position_tolerance_m: 0.000001
+  ik_orientation_tolerance_rad: 0.000001

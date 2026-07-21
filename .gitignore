@@ -1,0 +1,8 @@
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.venv/
+config.yaml
+recordings/
+demo_staging/
+pika_sensor_to_ur_tcp.json

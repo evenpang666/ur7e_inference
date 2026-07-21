@@ -1,0 +1,12 @@
+numpy<2.0,>=1.24
+opencv-python>=4.8
+PyYAML>=6.0
+pyrealsense2>=2.55
+ur-rtde>=1.6
+
+[demo]
+lerobot==0.3.3
+agx-pypika==0.1.1
+
+[dev]
+pytest>=8.0

@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: ur7e-vla-runtime
+Version: 0.1.0
+Summary: Local UR7e/Pika/RealSense runtime for a remote OpenPI policy server
+Requires-Python: >=3.9
+Requires-Dist: numpy<2.0,>=1.24
+Requires-Dist: opencv-python>=4.8
+Requires-Dist: PyYAML>=6.0
+Requires-Dist: pyrealsense2>=2.55
+Requires-Dist: ur-rtde>=1.6
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Provides-Extra: demo
+Requires-Dist: lerobot==0.3.3; extra == "demo"
+Requires-Dist: agx-pypika==0.1.1; extra == "demo"
