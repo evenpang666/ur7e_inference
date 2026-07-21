@@ -186,6 +186,168 @@ class VLARuntime:
         duration_s: float,
         executor: concurrent.futures.ThreadPoolExecutor,
     ) -> tuple[int, int]:
+        if self.cfg.policy.inference_mode == "synchronous":
+            return self._run_synchronous_task(task, duration_s, executor)
+        return self._run_async_queue_task(task, duration_s, executor)
+
+    def _execute_action(self, action: np.ndarray) -> np.ndarray:
+        current = self.robot.joints()
+        target = self.robot.action_to_target(action, current)
+        self.robot.send_target(target)
+        self.gripper.apply(action)
+        return target
+
+    @staticmethod
+    def _merge_action_queue(
+        queued: np.ndarray,
+        incoming: np.ndarray,
+        mode: str,
+        newest_weight: float,
+        guard_max_difference: float,
+    ) -> np.ndarray:
+        """Merge fresh actions into the same-time portion of an unexecuted queue."""
+        if queued.size == 0:
+            return incoming.copy()
+        overlap = min(queued.shape[0], incoming.shape[0])
+        merged = queued.copy()
+        if mode == "replace":
+            merged[:overlap] = incoming[:overlap]
+        elif mode == "weighted_blend":
+            # The first queued action is due earliest, so favor the fresh
+            # prediction most strongly there and taper toward an even blend.
+            weights = np.linspace(newest_weight, 0.5, overlap, dtype=np.float64)[:, None]
+            merged[:overlap] = (1.0 - weights) * merged[:overlap] + weights * incoming[:overlap]
+        elif mode == "guard":
+            close = np.max(np.abs(merged[:overlap] - incoming[:overlap]), axis=1) <= guard_max_difference
+            indices = np.flatnonzero(close)
+            merged[indices] = incoming[indices]
+        else:
+            raise ValueError(f"Unknown async merge mode: {mode}")
+        return np.concatenate([merged, incoming[overlap:]], axis=0)
+
+    def _run_synchronous_task(
+        self,
+        task: str,
+        duration_s: float,
+        executor: concurrent.futures.ThreadPoolExecutor,
+    ) -> tuple[int, int]:
+        """Execute exactly N actions, then block for a fresh observation/chunk."""
+        mode = "LIVE EXECUTION" if self.execute else "DRY RUN"
+        LOG.info("Prefetching first policy action chunk for synchronous task %r", task)
+        actions = self._log_inference(executor.submit(self._infer, self._observation(task)).result())
+        deadline = time.monotonic() + duration_s
+        period = 1.0 / self.cfg.robot.control_hz
+        action_count = 0
+        LOG.warning(
+            "Task started in %s synchronous mode; task=%r, execute_steps=%d",
+            mode, task, self.cfg.policy.synchronous_execute_steps,
+        )
+        while self._keep_running(self._stop, deadline):
+            steps = min(self.cfg.policy.synchronous_execute_steps, actions.shape[0])
+            for action in actions[:steps]:
+                if not self._keep_running(self._stop, deadline):
+                    break
+                if self.recorder is not None:
+                    self.recorder.check()
+                tick = time.monotonic()
+                target = self._execute_action(action)
+                action_count += 1
+                if action_count % self.cfg.runtime.log_every_n_actions == 0:
+                    LOG.info("Task %r applied %d actions; target=%s", task, action_count, np.round(target, 4).tolist())
+                remaining = period - (time.monotonic() - tick)
+                if remaining > 0:
+                    time.sleep(remaining)
+            if self._keep_running(self._stop, deadline):
+                LOG.info("Synchronous task %r executed %d steps; waiting for fresh inference", task, steps)
+                actions = self._log_inference(executor.submit(self._infer, self._observation(task)).result())
+        return action_count, 0
+
+    def _run_async_queue_task(
+        self,
+        task: str,
+        duration_s: float,
+        executor: concurrent.futures.ThreadPoolExecutor,
+    ) -> tuple[int, int]:
+        """Execute a queue while one fresh policy request runs in the background."""
+        LOG.info("Prefetching first policy action chunk for asynchronous task %r", task)
+        queue = self._log_inference(executor.submit(self._infer, self._observation(task)).result())
+        chunk_size = queue.shape[0]
+        deadline = time.monotonic() + duration_s
+        period = 1.0 / self.cfg.robot.control_hz
+        action_count = hold_count = control_step_count = 0
+        future = None
+        request_step: Optional[int] = None
+        last_target: Optional[np.ndarray] = None
+        LOG.warning(
+            "Task started in %s asynchronous mode; task=%r, trigger=%.2f, merge=%s",
+            "LIVE EXECUTION" if self.execute else "DRY RUN",
+            task,
+            self.cfg.policy.async_queue_trigger_fraction,
+            self.cfg.policy.async_merge_mode,
+        )
+        while self._keep_running(self._stop, deadline):
+            if future is not None and future.done():
+                if request_step is None:
+                    raise RuntimeError("Missing control-step timestamp for async inference request")
+                incoming = self._log_inference(future.result())
+                elapsed = control_step_count - request_step
+                if elapsed >= incoming.shape[0]:
+                    raise RuntimeError(
+                        f"Async inference result is fully stale: {elapsed} control steps elapsed "
+                        f"for a {incoming.shape[0]}-step action chunk"
+                    )
+                incoming = incoming[elapsed:]
+                queue = self._merge_action_queue(
+                    queue, incoming, self.cfg.policy.async_merge_mode,
+                    self.cfg.policy.async_blend_newest_weight,
+                    self.cfg.policy.async_guard_max_difference,
+                )
+                chunk_size = incoming.shape[0] + elapsed
+                LOG.info("Merged fresh async chunk after %d elapsed steps; queue now has %d actions", elapsed, queue.shape[0])
+                future = None
+                request_step = None
+
+            if queue.shape[0]:
+                if self.recorder is not None:
+                    self.recorder.check()
+                tick = time.monotonic()
+                action, queue = queue[0], queue[1:]
+                last_target = self._execute_action(action)
+                action_count += 1
+                control_step_count += 1
+                if action_count % self.cfg.runtime.log_every_n_actions == 0:
+                    LOG.info("Task %r applied %d actions; target=%s", task, action_count, np.round(last_target, 4).tolist())
+                if future is None and queue.shape[0] <= int(np.ceil(chunk_size * self.cfg.policy.async_queue_trigger_fraction)):
+                    request_step = control_step_count
+                    future = executor.submit(self._infer, self._observation(task))
+                    LOG.debug("Queued async inference for %r with %d actions remaining", task, queue.shape[0])
+                remaining = period - (time.monotonic() - tick)
+                if remaining > 0:
+                    time.sleep(remaining)
+                continue
+
+            # A slow server must not leave servoJ without targets. Hold until
+            # the in-flight request returns, while counting elapsed action time.
+            if future is None:
+                raise RuntimeError("Async action queue emptied without an inference request")
+            if self.recorder is not None:
+                self.recorder.check()
+            tick = time.monotonic()
+            if last_target is not None:
+                self.robot.send_target(last_target)
+                hold_count += 1
+                control_step_count += 1
+            remaining = period - (time.monotonic() - tick)
+            if remaining > 0:
+                time.sleep(remaining)
+        return action_count, hold_count
+
+    def _run_legacy_async_task(
+        self,
+        task: str,
+        duration_s: float,
+        executor: concurrent.futures.ThreadPoolExecutor,
+    ) -> tuple[int, int]:
         """Run one prompt while hardware and policy connections remain open."""
         execution_start = None
         action_count = 0

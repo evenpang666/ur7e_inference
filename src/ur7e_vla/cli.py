@@ -26,6 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--initial-state-file", help="override initial_robot_states.json path")
     run.add_argument("--initial-state-episode", help="select an episode instead of the nearest state")
+    run.add_argument("--inference-mode", choices=["synchronous", "asynchronous"])
+    run.add_argument("--async-merge-mode", choices=["replace", "weighted_blend", "guard"])
     sequence = sub.add_parser("run-sequence", help="run bounded VLA task prompts in order")
     sequence.add_argument("--config", default="config.yaml")
     sequence.add_argument(
@@ -50,6 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sequence.add_argument("--initial-state-file", help="override initial_robot_states.json path")
     sequence.add_argument("--initial-state-episode", help="select an episode for the first task")
+    sequence.add_argument("--inference-mode", choices=["synchronous", "asynchronous"])
+    sequence.add_argument("--async-merge-mode", choices=["replace", "weighted_blend", "guard"])
     sub.add_parser("list-cameras", help="probe local OpenCV/UVC camera indices")
     demo = sub.add_parser("collect-demo", help="record Pika Sense demonstrations into a LeRobot dataset")
     demo.add_argument("--config", default="config.yaml")
@@ -100,6 +104,10 @@ def main() -> None:
         cfg.initial_state.path = args.initial_state_file
     if args.initial_state_episode:
         cfg.initial_state.episode = args.initial_state_episode
+    if args.inference_mode:
+        cfg.policy.inference_mode = args.inference_mode
+    if args.async_merge_mode:
+        cfg.policy.async_merge_mode = args.async_merge_mode
     if args.command == "run-sequence" and args.step:
         try:
             cfg.runtime.sequence = [TaskStep(task=task, duration_s=float(seconds)) for task, seconds in args.step]

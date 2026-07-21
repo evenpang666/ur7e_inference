@@ -19,6 +19,12 @@ class PolicyConfig:
     action_dim: int = 7
     execute_steps_per_inference: int = 10
     max_inference_latency_s: float = 2.0
+    inference_mode: str = "asynchronous"
+    synchronous_execute_steps: int = 8
+    async_queue_trigger_fraction: float = 0.7
+    async_merge_mode: str = "weighted_blend"
+    async_blend_newest_weight: float = 0.7
+    async_guard_max_difference: float = 0.10
 
 
 @dataclass
@@ -171,6 +177,18 @@ class AppConfig:
             raise ValueError("cameras.max_frame_age_s must be positive")
         if self.policy.max_inference_latency_s <= 0:
             raise ValueError("policy.max_inference_latency_s must be positive")
+        if self.policy.inference_mode not in {"synchronous", "asynchronous"}:
+            raise ValueError("policy.inference_mode must be synchronous or asynchronous")
+        if self.policy.synchronous_execute_steps <= 0:
+            raise ValueError("policy.synchronous_execute_steps must be positive")
+        if not 0 < self.policy.async_queue_trigger_fraction <= 1:
+            raise ValueError("policy.async_queue_trigger_fraction must be in (0, 1]")
+        if self.policy.async_merge_mode not in {"replace", "weighted_blend", "guard"}:
+            raise ValueError("policy.async_merge_mode must be replace, weighted_blend, or guard")
+        if not 0 <= self.policy.async_blend_newest_weight <= 1:
+            raise ValueError("policy.async_blend_newest_weight must be in [0, 1]")
+        if self.policy.async_guard_max_difference < 0:
+            raise ValueError("policy.async_guard_max_difference must not be negative")
         if self.policy.action_dim != 7:
             raise ValueError("mani_real_pi05 returns exactly 7 action dimensions")
         if max(self.robot.action_joint_indices + [self.gripper.action_index]) >= self.policy.action_dim:

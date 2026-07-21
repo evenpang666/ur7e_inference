@@ -195,6 +195,25 @@ def test_fully_stale_action_chunk_is_rejected():
         VLARuntime._align_actions(actions, elapsed_control_steps=5)
 
 
+def test_async_replace_merges_new_chunk_over_queue_overlap():
+    queued = np.zeros((3, 7), dtype=np.float64)
+    incoming = np.ones((2, 7), dtype=np.float64)
+
+    merged = VLARuntime._merge_action_queue(queued, incoming, "replace", 0.7, 0.1)
+
+    np.testing.assert_array_equal(merged, np.array([[1] * 7, [1] * 7, [0] * 7], dtype=np.float64))
+
+
+def test_async_guard_keeps_large_action_changes_but_replaces_small_ones():
+    queued = np.zeros((2, 7), dtype=np.float64)
+    incoming = np.array([np.full(7, 0.05), np.full(7, 0.2)])
+
+    merged = VLARuntime._merge_action_queue(queued, incoming, "guard", 0.7, 0.1)
+
+    np.testing.assert_allclose(merged[0], incoming[0])
+    np.testing.assert_allclose(merged[1], queued[1])
+
+
 def test_control_keeps_sending_while_next_inference_runs(monkeypatch):
     monkeypatch.setattr(
         "ur7e_vla.runtime.resize_with_pad",

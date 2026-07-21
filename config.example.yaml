@@ -10,6 +10,12 @@ policy:
   action_dim: 7                 # 6 absolute UR joints + 1 absolute gripper
   execute_steps_per_inference: 10
   max_inference_latency_s: 2.0 # reject a stale action chunk
+  inference_mode: "asynchronous"
+  synchronous_execute_steps: 8
+  async_queue_trigger_fraction: 0.7
+  async_merge_mode: "weighted_blend" # replace | weighted_blend | guard
+  async_blend_newest_weight: 0.7
+  async_guard_max_difference: 0.10
 
 robot:
   ip: "169.254.175.10"

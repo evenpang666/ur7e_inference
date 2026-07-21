@@ -27,6 +27,56 @@
 
 程序默认 dry-run；只有传入 `--execute` 才会向 UR7e 和夹爪下发命令。每步关节变化、速度、软限位、相机新鲜度和推理延迟均有安全限制。
 
+## 环境安装
+
+机器人端与 pi05 服务端应使用**两个独立环境**：服务端运行 Sci-VLA/OpenPI 与 GPU 推理；机器人端只运行本项目、相机、Pika 和 `openpi-client`。不要在机器人端安装完整 OpenPI 模型依赖。
+
+### pi05 服务端（Linux + NVIDIA GPU）
+
+OpenPI 当前要求 Python 3.11，且推理建议使用显存大于 8 GB 的 NVIDIA GPU。以下命令在 `Sci-VLA/third_party/openpi` 目录执行；`uv` 负责创建和管理服务端环境。
+
+```bash
+cd /path/to/Sci-VLA/third_party/openpi
+
+# 首次安装；若仓库不是递归克隆，先执行：git submodule update --init --recursive
+GIT_LFS_SKIP_SMUDGE=1 uv sync
+GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+```
+
+确认 checkpoint 路径可读，并用 `nvidia-smi` 检查 GPU、显存及是否存在其他占用推理卡的进程。之后按下一节的服务端命令启动 `mani_real_pi05`。
+
+### 机器人端（Windows / `ur7e_collector`）
+
+本项目要求 Python 3.9 或更高版本。以下是包含推理、录像和示教采集依赖的完整安装方式；路径请替换为你的实际路径。
+
+```powershell
+conda create -n ur7e_collector python=3.10 -y
+conda activate ur7e_collector
+python -m pip install --upgrade pip
+
+cd C:\Users\15261\Documents\projects\Sci-VLA\third_party\openpi
+python -m pip install -e packages\openpi-client
+
+cd C:\Users\15261\Documents\projects\ur7e_inference
+python -m pip install -e ".[demo]"
+```
+
+只运行实时推理、不使用 LeRobot 示教采集时，也可使用较小安装：
+
+```powershell
+python -m pip install -e .
+python -m pip install agx-pypika
+```
+
+`.[demo]` 额外安装 LeRobot 与 Pika SDK。Pika Sense Lighthouse 标定还需要 Pika SDK 所依赖的 `libsurvive/pysurvive` 后端；缺失时示教采集器会明确报错。RealSense 驱动、D435i/D405 固件和 Windows USB 访问权限仍需按设备厂商要求安装与确认。
+
+安装后，在机器人端验证命令行入口和策略网络连通性：
+
+```powershell
+ur7e-vla --help
+python scripts\probe_policy.py --host 192.168.124.15 --port 8000
+```
+
 ## 1. 推理主机 192.168.124.15
 
 在你的 Sci-VLA OpenPI 目录启动：
@@ -149,7 +199,21 @@ ur7e-vla run --config config.yaml --task "open lid" \
 
 不传 `--duration` 且配置为 `duration_s: null` 时无限运行；`--duration 120` 表示动作循环运行120秒。`Ctrl+C`、SIGTERM、通信异常、超过推理延迟、相机画面陈旧、非法 action 或关节越界都会停止伺服。
 
-`mani_real` 数据集频率已确认为15 FPS。首个 action chunk 会在运动前预取。运行中以15 Hz执行每个chunk的10步，并在第5步后异步采样、推理下一chunk；推理与后5步动作并行。切换chunk时会根据采样后已经过去的控制周期丢弃新chunk开头的过期动作，例如第5步采样、第10步切换时从新chunk的第6个动作开始。如果推理偶尔未在10步结束前返回，控制线程会持续发送最后目标保持UR伺服，并把这些保持周期计入动作时间对齐；整个预测块都已过期时程序会安全停止。
+`mani_real` 数据集频率已确认为15 FPS。首个 action chunk 会在运动前预取；后续控制的同步与异步时序见下节。若推理慢到整个预测块均已过期，程序会安全停止。
+
+### 15 Hz 推理控制模式
+
+`policy.inference_mode` 可选两种模式：
+
+- `synchronous`：先执行当前 chunk 的前 `synchronous_execute_steps: 8` 步，再采集最新观测并等待新的推理 chunk；适合需要最直接、可预测时序的调试。
+- `asynchronous`：默认模式。客户端维护 action queue；当队列长度低于 `async_queue_trigger_fraction`（默认 chunk 的 70%）时后台发送新观测。新 chunk 返回后会跳过请求期间已过时的步骤，并与尚未执行的队列重叠合并。
+
+异步合并由 `async_merge_mode` 控制：`replace` 直接使用新 action，`weighted_blend` 按时间权重融合（默认），`guard` 仅在新旧 action 最大差异不超过 `async_guard_max_difference` 时替换。可以临时覆盖：
+
+```powershell
+ur7e-vla run --config config.yaml --task "open lid" --inference-mode synchronous --execute
+ur7e-vla run --config config.yaml --task "open lid" --inference-mode asynchronous --async-merge-mode weighted_blend --execute
+```
 
 ## 上真机前必须确认
 
