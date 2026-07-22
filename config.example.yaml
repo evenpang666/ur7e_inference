@@ -50,11 +50,13 @@ gripper:
   enabled: true
   serial_port: "/dev/ttyUSB1"
   action_index: 6
-  policy_min: 0.0              # confirmed raw mani_real gripper range
-  policy_max: 1.0
+  policy_min: 0.0              # mani_real convention: open = 0
+  policy_max: 1.0              # mani_real convention: closed = 1
   min_angle_rad: 0.0
   max_angle_rad: 1.0
-  invert: false
+  # Paired with demo.gripper_invert: physical hand-to-gripper direction is
+  # unchanged; only stored policy values become open=0, closed=1.
+  invert: true
 
 initial_state:
   enabled: false              # true restores task state before the first inference
@@ -79,7 +81,7 @@ demo:
   # A missing task creates <root>/<normalized_task>/ as a new v2.1 dataset.
   root: "~/.cache/huggingface/lerobot/mani_real"
   repo_id: "mani_real"
-  staging_dir: "demo_staging"  # replay is staged here until Save Episode is clicked
+  staging_dir: "demo_staging"  # live teleoperation is staged here until Save Episode is clicked
   fps: 15
   image_width: 256
   image_height: 256
@@ -91,7 +93,11 @@ demo:
   max_tracker_age_s: 0.25
   gripper_distance_min_mm: 0.0
   gripper_distance_max_mm: 85.0
-  gripper_invert: false
+  # Paired with gripper.invert: Sensor opening distance is stored as
+  # policy open=0, closed=1 without changing physical teleoperation direction.
+  gripper_invert: true
+  # Sensor axes relative to the UR tool; matches RobotControl teleoperation.
+  sensor_to_tool_rpy: [0.0, 1.5707963267948966, 0.0]
   translation_scale: 1.0
   rotation_scale: 1.0
   max_translation_m: 0.50

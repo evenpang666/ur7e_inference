@@ -66,7 +66,9 @@ class GripperConfig:
     policy_max: float = 1.0
     min_angle_rad: float = 0.0
     max_angle_rad: float = 1.0
-    invert: bool = False
+    # Dataset convention: policy_max means closed. Set true when increasing
+    # the physical motor angle opens the Pika gripper.
+    invert: bool = True
 
 
 @dataclass
@@ -117,8 +119,7 @@ class DemoConfig:
     tracker_backend: str = "pysurvive"
     tracker_start_timeout_s: float = 30.0
     max_tracker_age_s: float = 0.25
-    # Created by `ur7e-vla calibrate-demo`.  It maps a Lighthouse/Sensor pose
-    # directly into the UR TCP frame and is deliberately required for replay.
+    # Kept for compatibility with previously collected trajectory replay.
     calibration_path: str = "pika_sensor_to_ur_tcp.json"
     calibration_pose_count: int = 5
     calibration_max_position_rmse_m: float = 0.03
@@ -128,7 +129,12 @@ class DemoConfig:
     approach_settle_s: float = 0.25
     gripper_distance_min_mm: float = 0.0
     gripper_distance_max_mm: float = 85.0
-    gripper_invert: bool = False
+    # Pika Sense reports a larger opening distance for an open hand. Invert it
+    # so demonstrations use closed=1 and open=0.
+    gripper_invert: bool = True
+    # Pika Sense axes relative to the UR tool. This matches RobotControl's
+    # teleoperation default and is applied before taking relative poses.
+    sensor_to_tool_rpy: list[float] = field(default_factory=lambda: [0.0, 1.5707963267948966, 0.0])
     translation_scale: float = 1.0
     rotation_scale: float = 1.0
     max_translation_m: float = 0.50
@@ -231,6 +237,8 @@ class AppConfig:
             raise ValueError("demo.approach_settle_s must not be negative")
         if self.demo.gripper_distance_max_mm <= self.demo.gripper_distance_min_mm:
             raise ValueError("demo gripper distance range is invalid")
+        if len(self.demo.sensor_to_tool_rpy) != 3:
+            raise ValueError("demo.sensor_to_tool_rpy must contain roll, pitch, yaw")
         if self.demo.translation_scale <= 0 or self.demo.rotation_scale <= 0:
             raise ValueError("demo pose scales must be positive")
         if self.demo.max_translation_m <= 0 or self.demo.max_rotation_rad <= 0:

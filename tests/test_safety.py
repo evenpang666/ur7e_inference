@@ -137,6 +137,29 @@ def test_gripper_maps_policy_units_to_physical_angle():
     assert gripper._device.commanded == pytest.approx(0.7)
 
 
+def test_data_gripper_inversion_preserves_teleoperation_motor_command():
+    class FakeGripper:
+        commanded = None
+
+        def set_motor_angle(self, angle):
+            self.commanded = angle
+            return True
+
+    sensor_opening = 0.25  # Original Sensor command: 0=closed, 1=open.
+    original = PikaGripper(GripperConfig(invert=False), execute=True)
+    original._device = FakeGripper()
+    original.apply(np.array([0, 0, 0, 0, 0, 0, sensor_opening]))
+
+    # New data convention stores open=0 and closed=1, while the paired motor
+    # inversion keeps the physical command identical to the original path.
+    stored_value = 1.0 - sensor_opening
+    normalized = PikaGripper(GripperConfig(invert=True), execute=True)
+    normalized._device = FakeGripper()
+    normalized.apply(np.array([0, 0, 0, 0, 0, 0, stored_value]))
+
+    assert normalized._device.commanded == pytest.approx(original._device.commanded)
+
+
 def test_observation_matches_mani_real_pi05_protocol(monkeypatch):
     monkeypatch.setattr(
         "ur7e_vla.runtime.resize_with_pad",

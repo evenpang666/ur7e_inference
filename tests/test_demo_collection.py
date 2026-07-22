@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 
 from ur7e_vla.cli import build_parser
-from ur7e_vla.config import DemoConfig
+from ur7e_vla.config import DemoConfig, GripperConfig
 from ur7e_vla.demo_collection import (
     DemonstrationTrajectory,
     PendingEpisode,
@@ -16,6 +16,7 @@ from ur7e_vla.demo_collection import (
     matrix_to_pose,
     normalize_task,
     pose_to_matrix,
+    rpy_to_matrix,
     solve_sensor_to_tcp_hand_eye,
 )
 
@@ -35,6 +36,19 @@ def test_collect_demo_cli_requires_explicit_execute():
 def test_pose_matrix_round_trip():
     pose = np.asarray([0.1, -0.2, 0.3, 0.2, -0.3, 0.4])
     assert np.allclose(matrix_to_pose(pose_to_matrix(pose)), pose, atol=1e-8)
+
+
+def test_sensor_to_tool_rotation_matches_robotcontrol_default():
+    rotation = rpy_to_matrix(0.0, np.pi / 2.0, 0.0)
+    assert np.allclose(rotation @ [1.0, 0.0, 0.0], [0.0, 0.0, -1.0], atol=1e-8)
+    assert np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-8)
+
+
+def test_default_gripper_convention_is_closed_one_open_zero():
+    demo = DemoConfig()
+    gripper = GripperConfig()
+    assert demo.gripper_invert is True
+    assert gripper.invert is True
 
 
 def test_tracker_path_is_relative_to_robot_replay_anchor():

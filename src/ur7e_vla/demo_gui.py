@@ -7,11 +7,8 @@ from typing import Optional
 
 from .config import AppConfig
 from .demo_collection import (
-    DemoReplay,
-    DemonstrationTrajectory,
+    LiveDemoCollector,
     PendingEpisode,
-    PikaSenseSource,
-    record_sensor_trajectory,
     save_pending_episode,
 )
 
@@ -29,10 +26,7 @@ class DemoCollectorGUI:
         self.root.title("UR7e / Pika LeRobot 演示采集")
         self.root.geometry("650x330")
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
-        self.sensor_stop = threading.Event()
-        self.replay_stop = threading.Event()
-        self.source: Optional[PikaSenseSource] = None
-        self.trajectory: Optional[DemonstrationTrajectory] = None
+        self.collect_stop = threading.Event()
         self.pending: Optional[PendingEpisode] = None
         self.busy = False
         self.discard_requested = False
@@ -41,21 +35,20 @@ class DemoCollectorGUI:
         self.task_var = tk.StringVar(value=task)
         self.task_entry = tk.Entry(self.root, textvariable=self.task_var, font=("Segoe UI", 12))
         self.task_entry.pack(fill="x", padx=16)
-        self.status_var = tk.StringVar(value="就绪：先录制 Pika Sensor 完整路径")
+        self.status_var = tk.StringVar(value="就绪：Pika Sensor 将实时遥控 UR7e 和夹爪，并同步采集")
         tk.Label(self.root, textvariable=self.status_var, justify="left", wraplength=610).pack(
             fill="x", padx=16, pady=16
         )
         button_row = tk.Frame(self.root)
         button_row.pack(fill="x", padx=12)
-        self.record_button = tk.Button(button_row, text="开始录制 Sensor", command=self.start_recording)
-        self.stop_button = tk.Button(button_row, text="停止录制", command=self.stop_recording, state="disabled")
-        self.replay_button = tk.Button(button_row, text="开始机械臂回放", command=self.start_replay, state="disabled")
+        self.record_button = tk.Button(button_row, text="开始遥控采集", command=self.start_recording)
+        self.stop_button = tk.Button(button_row, text="停止采集", command=self.stop_recording, state="disabled")
         self.save_button = tk.Button(button_row, text="保存 Episode", command=self.save, state="disabled")
         self.discard_button = tk.Button(button_row, text="舍弃并重录", command=self.discard, state="disabled")
-        for button in (self.record_button, self.stop_button, self.replay_button, self.save_button, self.discard_button):
+        for button in (self.record_button, self.stop_button, self.save_button, self.discard_button):
             button.pack(side="left", padx=4, pady=5)
         self.mode_var = tk.StringVar(
-            value="真实回放已启用" if execute else "预览模式：未传 --execute，机械臂回放按钮不会启用"
+            value="实时遥控已启用" if execute else "未传 --execute：为防止误动作，不能开始遥控采集"
         )
         tk.Label(self.root, textvariable=self.mode_var, fg="#9b2c2c" if not execute else "#276749").pack(
             anchor="w", padx=16, pady=12
@@ -89,73 +82,38 @@ class DemoCollectorGUI:
         except ValueError as exc:
             messagebox.showerror("任务无效", str(exc))
             return
+        if not self.execute:
+            messagebox.showwarning("未启用真实遥控", "请关闭窗口并用 --execute 重新启动。")
+            return
+        if not messagebox.askyesno(
+            "确认开始遥控采集",
+            "Pika Sensor 将立即遥控 UR7e 和夹爪，并同步采集数据。\n请清空工作区、释放急停并确认示教器处于 Remote Control。",
+        ):
+            return
         if self.pending is not None:
             self.pending.discard()
             self.pending = None
-        self.trajectory = None
-        self.sensor_stop.clear()
+        self.collect_stop.clear()
         self.discard_requested = False
         self.task_entry.configure(state="disabled")
         self.record_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
-        self.replay_button.configure(state="disabled")
         self.save_button.configure(state="disabled")
         self.discard_button.configure(state="disabled")
-        self.status_var.set("正在连接 Pika Sense 和 Lighthouse 基站……")
+        self.status_var.set("正在连接 Pika Sense、UR7e、夹爪和相机……")
 
         def work():
-            if self.source is None or not self.source.is_ready:
-                self.source = PikaSenseSource(self.cfg.demo)
-                try:
-                    self.source.connect()
-                except BaseException:
-                    self.source.close()
-                    self.source = None
-                    raise
-            self.events.put(("record_progress", 0))
-            return record_sensor_trajectory(
-                self.source,
-                self.cfg.demo.fps,
-                self.sensor_stop,
+            return LiveDemoCollector(self.cfg).run(
+                self.collect_stop,
                 lambda count: self.events.put(("record_progress", count)) if count % self.cfg.demo.fps == 0 else None,
             )
 
         self._background("record_done", work)
 
     def stop_recording(self) -> None:
-        self.sensor_stop.set()
+        self.collect_stop.set()
         self.stop_button.configure(state="disabled")
-        self.status_var.set("正在结束 Sensor 轨迹录制……")
-
-    def start_replay(self) -> None:
-        from tkinter import messagebox
-
-        if not self.execute:
-            messagebox.showwarning("未启用真实回放", "请关闭窗口并用 --execute 重新启动。")
-            return
-        if self.trajectory is None:
-            return
-        if not messagebox.askyesno(
-            "确认机械臂回放",
-            "即将连接 UR7e、夹爪和两路相机并执行示教轨迹。\n请清空工作区、释放急停并确认示教器处于 Remote Control。",
-        ):
-            return
-        self.replay_stop.clear()
-        self.discard_requested = False
-        self.replay_button.configure(state="disabled")
-        self.record_button.configure(state="disabled")
-        self.discard_button.configure(state="normal")
-        self.status_var.set("正在做逆解并回放；图像、实际关节角和 action 正在暂存……")
-
-        def work():
-            replay = DemoReplay(self.cfg)
-            return replay.run(
-                self.trajectory,
-                self.replay_stop,
-                lambda count: self.events.put(("replay_progress", count)) if count % self.cfg.demo.fps == 0 else None,
-            )
-
-        self._background("replay_done", work)
+        self.status_var.set("正在停止遥控并结束暂存……")
 
     def save(self) -> None:
         if self.pending is None:
@@ -167,13 +125,11 @@ class DemoCollectorGUI:
         self._background("save_done", lambda: save_pending_episode(pending, self._task(), self.cfg.demo))
 
     def discard(self) -> None:
-        self.sensor_stop.set()
-        self.replay_stop.set()
+        self.collect_stop.set()
         if self.busy:
             self.discard_requested = True
             self.record_button.configure(state="disabled")
             self.stop_button.configure(state="disabled")
-            self.replay_button.configure(state="disabled")
             self.save_button.configure(state="disabled")
             self.discard_button.configure(state="disabled")
             self.status_var.set("正在停止当前操作并舍弃暂存……")
@@ -184,15 +140,13 @@ class DemoCollectorGUI:
         if self.pending is not None:
             self.pending.discard()
             self.pending = None
-        self.trajectory = None
         self.busy = False
         self.task_entry.configure(state="normal")
         self.record_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
-        self.replay_button.configure(state="disabled")
         self.save_button.configure(state="disabled")
         self.discard_button.configure(state="disabled")
-        self.status_var.set("已舍弃，未修改 demo 数据集；可以重新录制 Sensor 路径")
+        self.status_var.set("已舍弃，未修改 demo 数据集；可以重新开始遥控采集")
 
     def _poll(self) -> None:
         from tkinter import messagebox
@@ -203,7 +157,7 @@ class DemoCollectorGUI:
                 if kind == "record_progress":
                     count = int(payload)
                     self.status_var.set(
-                        "Sensor 已连接，正在录制……" if count == 0 else f"正在录制 Sensor 路径：{count} 帧"
+                        "Pika 已连接，正在遥控采集……" if count == 0 else f"正在遥控采集：{count} 帧"
                     )
                 elif kind == "record_done":
                     self.busy = False
@@ -211,25 +165,12 @@ class DemoCollectorGUI:
                         self.discard_requested = False
                         self._finish_discard()
                         continue
-                    self.trajectory = payload  # type: ignore[assignment]
-                    self.stop_button.configure(state="disabled")
-                    self.replay_button.configure(state="normal" if self.execute else "disabled")
-                    self.discard_button.configure(state="normal")
-                    self.status_var.set(f"Sensor 路径录制完成：{len(self.trajectory.samples)} 帧。请点击开始机械臂回放。")
-                elif kind == "replay_progress":
-                    self.status_var.set(f"正在回放并暂存 episode：{int(payload)} 帧")
-                elif kind == "replay_done":
-                    self.busy = False
-                    if self.discard_requested:
-                        self.discard_requested = False
-                        payload.discard()  # type: ignore[union-attr]
-                        self._finish_discard()
-                        continue
                     self.pending = payload  # type: ignore[assignment]
+                    self.stop_button.configure(state="disabled")
                     self.save_button.configure(state="normal")
                     self.discard_button.configure(state="normal")
                     self.status_var.set(
-                        f"回放完成：暂存 {len(self.pending.frames)} 帧。点击保存才会写入数据集，或舍弃并重录。"
+                        f"遥控采集完成：暂存 {len(self.pending.frames)} 帧。点击保存才会写入数据集，或舍弃并重录。"
                     )
                 elif kind == "save_done":
                     self.busy = False
@@ -237,7 +178,6 @@ class DemoCollectorGUI:
                     if self.pending is not None:
                         self.pending.discard()
                     self.pending = None
-                    self.trajectory = None
                     self.task_entry.configure(state="normal")
                     self.record_button.configure(state="normal")
                     self.discard_button.configure(state="disabled")
@@ -249,16 +189,11 @@ class DemoCollectorGUI:
                         self.discard_requested = False
                         self._finish_discard()
                         continue
-                    self.sensor_stop.set()
-                    self.replay_stop.set()
-                    if self.source is not None:
-                        self.source.close()
-                        self.source = None
+                    self.collect_stop.set()
                     self.task_entry.configure(state="normal")
                     self.record_button.configure(state="normal")
                     self.stop_button.configure(state="disabled")
-                    self.replay_button.configure(state="normal" if self.trajectory and self.execute else "disabled")
-                    self.discard_button.configure(state="normal" if self.trajectory or self.pending else "disabled")
+                    self.discard_button.configure(state="normal" if self.pending else "disabled")
                     self.status_var.set(f"失败：{payload}")
                     messagebox.showerror("采集失败", str(payload))
         except queue.Empty:
@@ -270,12 +205,9 @@ class DemoCollectorGUI:
 
         if self.busy and not messagebox.askyesno("退出", "采集或保存仍在进行，确定停止并退出吗？"):
             return
-        self.sensor_stop.set()
-        self.replay_stop.set()
+        self.collect_stop.set()
         if self.pending is not None:
             self.pending.discard()
-        if self.source is not None:
-            self.source.close()
         self.root.destroy()
 
     def run(self) -> None:
