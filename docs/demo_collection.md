@@ -39,7 +39,7 @@ demo:
 
 `ur7e-vla collect-demo` 的窗口用于 Pika Sensor 遥操和 LeRobot episode 采集；
 `ur7e-vla vla-gui` 用于执行远程 OpenPI/VLA 策略。后者可实时更新任务文本、切换同步/
-异步推理、录制双相机视频，并提供 `Restore Initial State + Apply Task` 安全恢复流程；
+异步推理、独立录制双相机视频，并通过 `Restore initial state` 选项配合 `Apply Task` 执行安全恢复；
 它不会生成示教数据集 episode。
 
 采集窗口将遥控与录制分离：直接在窗口输入任务描述（`--task` 仅用于预填），再点击 **Start Teleoperation**；遥控已启动后才能点击 **Start Recording**。点击 **Stop Recording** 只结束当前 episode 的暂存，机械臂与夹爪仍保持遥控；必须点击 **Pause Teleoperation** 才会停止伺服并断开硬件。停止录制后先保存或丢弃该 episode，才能开始下一段录制。

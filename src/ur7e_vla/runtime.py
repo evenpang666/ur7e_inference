@@ -20,7 +20,7 @@ LOG = logging.getLogger(__name__)
 
 
 class VLARuntime:
-    def __init__(self, cfg: AppConfig, execute: bool = False):
+    def __init__(self, cfg: AppConfig, execute: bool = False, *, keep_hardware_connected: bool = False):
         self.cfg = cfg
         self.execute = execute
         self.robot = UR7e(cfg.robot, execute)
@@ -35,6 +35,46 @@ class VLARuntime:
         self._last_logged_policy_prompt: Optional[str] = None
         self._task_update_requested = threading.Event()
         self._stop = False
+        # The GUI keeps the physical interfaces alive while policy sessions are
+        # stopped and restarted.  CLI invocations retain the original cleanup
+        # behaviour by leaving this disabled.
+        self.keep_hardware_connected = keep_hardware_connected
+        self._hardware_connected = False
+        self._hardware_lock = threading.Lock()
+
+    def configure_gui_session(self, cfg: AppConfig) -> None:
+        """Apply GUI-only session settings without reconnecting hardware."""
+        if not self.keep_hardware_connected:
+            raise RuntimeError("Reusable sessions are only available to the GUI runtime")
+        self.cfg = cfg
+        self._stop = False
+        self._task_update_requested.clear()
+        self._last_logged_policy_prompt = None
+
+    def connect_hardware(self) -> None:
+        """Connect robot, gripper, and cameras once for a reusable GUI runtime."""
+        with self._hardware_lock:
+            if self._hardware_connected:
+                return
+            LOG.info("Connecting to UR7e receive interface at %s", self.cfg.robot.ip)
+            self.robot.connect()
+            self.gripper.connect()
+            self.cameras.start()
+            self._hardware_connected = True
+
+    def disconnect_hardware(self) -> None:
+        """Release physical interfaces.  This is intentionally only used on exit."""
+        with self._hardware_lock:
+            if not self._hardware_connected:
+                return
+            try:
+                self.robot.stop()
+            finally:
+                try:
+                    self.gripper.stop()
+                finally:
+                    self.cameras.stop()
+                    self._hardware_connected = False
 
     def request_stop(self) -> None:
         self._stop = True
@@ -65,6 +105,7 @@ class VLARuntime:
 
     def start_video_recording(self) -> str:
         """Start an MP4 capture while an already-connected runtime is active."""
+        self.connect_hardware()
         with self._recorder_lock:
             if self.recorder is not None:
                 if self.recorder.output_path is None:
@@ -552,10 +593,7 @@ class VLARuntime:
         total_actions = 0
         total_holds = 0
         try:
-            LOG.info("Connecting to UR7e receive interface at %s", self.cfg.robot.ip)
-            self.robot.connect()
-            self.gripper.connect()
-            self.cameras.start()
+            self.connect_hardware()
             if self.cfg.runtime.record_video:
                 self.start_video_recording()
             self.policy = OpenPIPolicy(self.cfg.policy)
@@ -580,22 +618,25 @@ class VLARuntime:
                 total_actions += actions
                 total_holds += holds
         finally:
-            # Stop motion first, then release sensors and serial devices.
-            try:
-                self.robot.stop()
-            finally:
+            # A GUI policy stop only stops servoj/policy work; it deliberately
+            # leaves the robot, gripper, cameras, and any video recording live.
+            if self.keep_hardware_connected:
+                self.robot.stop_servo()
+            else:
                 try:
-                    self.gripper.stop()
+                    self.robot.stop()
                 finally:
                     try:
-                        self.stop_video_recording()
+                        self.gripper.stop()
                     finally:
                         try:
-                            self.cameras.stop()
+                            self.stop_video_recording()
                         finally:
-                            if executor is not None:
-                                executor.shutdown(wait=False, cancel_futures=True)
-                            LOG.info(
-                                "Runtime stopped after %.2fs, %d action steps, %d hold steps",
-                                time.monotonic() - invocation_start, total_actions, total_holds,
-                            )
+                            self.cameras.stop()
+                            self._hardware_connected = False
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
+            LOG.info(
+                "Runtime stopped after %.2fs, %d action steps, %d hold steps",
+                time.monotonic() - invocation_start, total_actions, total_holds,
+            )
