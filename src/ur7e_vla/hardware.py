@@ -89,7 +89,15 @@ class UR7e:
             raise RuntimeError(f"Target violates configured joint limits: {target.tolist()}")
         return target
 
-    def send_target(self, target: np.ndarray, period_s: float | None = None) -> None:
+    def send_target(
+        self,
+        target: np.ndarray,
+        period_s: float | None = None,
+        speed_rad_s: float | None = None,
+        acceleration_rad_s2: float | None = None,
+        lookahead_s: float | None = None,
+        gain: int | None = None,
+    ) -> None:
         if not self.execute:
             return
         if self._control is None:
@@ -99,11 +107,11 @@ class UR7e:
             raise ValueError("servoJ period must be positive")
         ok = self._control.servoJ(
             target.tolist(),
-            self.cfg.max_joint_speed_rad_s,
-            1.0,
+            self.cfg.max_joint_speed_rad_s if speed_rad_s is None else speed_rad_s,
+            1.0 if acceleration_rad_s2 is None else acceleration_rad_s2,
             period,
-            self.cfg.servo_lookahead_s,
-            self.cfg.servo_gain,
+            self.cfg.servo_lookahead_s if lookahead_s is None else lookahead_s,
+            self.cfg.servo_gain if gain is None else gain,
         )
         if ok is False:
             raise RuntimeError("UR servoJ rejected target")
@@ -147,6 +155,8 @@ class PikaGripper:
         self.execute = execute
         self._device = None
         self._position = 0.0
+        self._last_motor_target: float | None = None
+        self._last_motor_target_at = float("-inf")
 
     def connect(self) -> None:
         if not self.cfg.enabled:
@@ -177,6 +187,19 @@ class PikaGripper:
             self._position = self.cfg.policy_min + physical * policy_span
         return self._position
 
+    def motor_feedback(self) -> dict[str, float | int | str] | None:
+        """Return the latest unsolicited Pika telemetry without issuing I/O."""
+        if self._device is None:
+            return None
+        get_data = getattr(self._device, "get_motor_data", None)
+        get_status = getattr(self._device, "get_motor_status", None)
+        if not callable(get_data):
+            return None
+        feedback = dict(get_data())
+        if callable(get_status):
+            feedback.update(get_status())
+        return feedback
+
     def apply(self, action: np.ndarray) -> None:
         if not self.cfg.enabled:
             return
@@ -188,15 +211,46 @@ class PikaGripper:
         if self.cfg.invert:
             physical = 1.0 - physical
         angle = self.cfg.min_angle_rad + physical * (self.cfg.max_angle_rad - self.cfg.min_angle_rad)
+        self.set_motor_angle(angle)
+
+    def set_motor_angle(self, angle: float) -> None:
+        """Direct Pika motor command, matching RobotControl teleoperation."""
+        self._send_motor_angle(angle)
+
+    def set_latest_motor_angle(
+        self,
+        angle: float,
+        *,
+        min_interval_s: float,
+        deadband_rad: float,
+    ) -> bool:
+        """Publish only fresh, meaningful teleop targets to the Pika firmware."""
+        if min_interval_s <= 0:
+            raise ValueError("Pika command interval must be positive")
+        if deadband_rad < 0:
+            raise ValueError("Pika command deadband cannot be negative")
+        angle = float(np.clip(angle, self.cfg.min_angle_rad, self.cfg.max_angle_rad))
+        now = time.monotonic()
+        if self._last_motor_target is not None:
+            if abs(angle - self._last_motor_target) < deadband_rad:
+                return False
+            if now - self._last_motor_target_at < min_interval_s:
+                return False
+        self._send_motor_angle(angle)
+        self._last_motor_target = angle
+        self._last_motor_target_at = now
+        return True
+
+    def _send_motor_angle(self, angle: float) -> None:
+        angle = float(np.clip(angle, self.cfg.min_angle_rad, self.cfg.max_angle_rad))
         if self.execute:
             if self._device is None:
                 raise RuntimeError("Pika gripper is not connected")
             accepted = self._device.set_motor_angle(angle)
             if accepted is False:
                 raise RuntimeError("Pika gripper rejected target angle")
-            LOG.info(
-                "Pika gripper command: policy=%.4f motor_rad=%.4f accepted=%s",
-                policy_value,
+            LOG.debug(
+                "Pika gripper motor command: motor_rad=%.4f accepted=%s",
                 angle,
                 accepted,
             )

@@ -68,6 +68,8 @@ class CameraPair:
         self._wrist: Optional[LatestFrame] = None
 
     def start(self) -> None:
+        if self._exterior is not None or self._wrist is not None:
+            return
         import cv2
         import pyrealsense2 as rs
 
@@ -158,6 +160,11 @@ class CameraPair:
             self._pipeline.stop()
         if self._wrist_pipeline:
             self._wrist_pipeline.stop()
+        self._pipeline = None
+        self._wrist_pipeline = None
+        self._capture = None
+        self._exterior = None
+        self._wrist = None
 
 
 def resize_with_pad(image: np.ndarray, size: int) -> np.ndarray:

@@ -104,6 +104,10 @@ demo:
   sensor_to_tool_rpy: [0.0, 1.5707963267948966, 0.0]
   translation_scale: 1.0
   rotation_scale: 1.0
+  teleop_joint_speed_rad_s: 1.50
+  teleop_joint_acceleration_rad_s2: 0.50
+  teleop_servo_lookahead_s: 0.20
+  teleop_servo_gain: 100
   max_translation_m: 0.50
   max_rotation_rad: 3.142
   # Suppress Lighthouse micro-jitter while the Sensor is held still.
@@ -111,5 +115,8 @@ demo:
   tracker_orientation_deadband_rad: 0.02
   max_ik_joint_step_rad: 0.02
   max_gripper_step: 0.10
+  # Coalesce raw Pika targets during teleop to prevent firmware backlog.
+  teleop_gripper_command_hz: 5.0
+  teleop_gripper_deadband_rad: 0.05
   ik_position_tolerance_m: 0.000001
   ik_orientation_tolerance_rad: 0.000001

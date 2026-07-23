@@ -137,6 +137,28 @@ def test_gripper_maps_policy_units_to_physical_angle():
     assert gripper._device.commanded == pytest.approx(0.7)
 
 
+def test_gripper_teleop_command_coalesces_stale_targets(monkeypatch):
+    class FakeGripper:
+        def __init__(self):
+            self.commanded = []
+
+        def set_motor_angle(self, angle):
+            self.commanded.append(angle)
+            return True
+
+    now = [10.0]
+    monkeypatch.setattr("ur7e_vla.hardware.time.monotonic", lambda: now[0])
+    gripper = PikaGripper(GripperConfig(), execute=True)
+    gripper._device = FakeGripper()
+
+    assert gripper.set_latest_motor_angle(1.7, min_interval_s=0.2, deadband_rad=0.05)
+    now[0] += 0.02
+    assert not gripper.set_latest_motor_angle(1.0, min_interval_s=0.2, deadband_rad=0.05)
+    now[0] += 0.20
+    assert gripper.set_latest_motor_angle(0.1, min_interval_s=0.2, deadband_rad=0.05)
+    assert gripper._device.commanded == pytest.approx([1.7, 0.1])
+
+
 def test_data_gripper_inversion_preserves_teleoperation_motor_command():
     class FakeGripper:
         commanded = None

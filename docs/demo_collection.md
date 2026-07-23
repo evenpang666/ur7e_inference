@@ -26,7 +26,7 @@ demo:
 - `pika_sense_port`：Pika Sense 串口；`tracker_device` 可指定 Tracker 名称。
 - `gripper_distance_min_mm/max_mm`、`translation_scale`、`rotation_scale`：按当前设备标定。
 - `sensor_to_tool_rpy`：Sensor 到工具坐标的固定旋转，默认值与 `RobotControl` 一致。
-- `max_translation_m`、`max_rotation_rad`、`max_ik_joint_step_rad`、`max_gripper_step`：真机安全边界。实时 IK 目标按 `min(max_ik_joint_step_rad, robot.max_joint_step_rad, robot.max_joint_speed_rad_s / demo.fps)` 限速；超出时会分多帧安全逼近，而不是中止采集。
+- `max_translation_m`、`max_rotation_rad`、`max_ik_joint_step_rad`：真机机械臂安全边界。实时 IK 目标按 `min(max_ik_joint_step_rad, robot.max_joint_step_rad, robot.max_joint_speed_rad_s / demo.fps)` 限速；超出时会分多帧安全逼近，而不是中止采集。Pika 夹爪则与推理端一致，直接跟随 Sensor 的位置指令，不使用 `max_gripper_step` 限速。
 - `gripper.max_angle_rad`：Pika 夹爪电机通常使用 `0.0`（闭合）至约 `1.7 rad`（张开）；使用 `1.0` 会截断近 40% 行程。实时手部开合也按 `max_gripper_step` 逐帧限速。
 - `gripper_closed_rad`、`gripper_open_rad`：Pika Sense 的 AS5047 原始编码器范围。实时遥操直接以该弧度范围映射到 Pika 电机（与 RobotControl 一致），不使用非线性的估算毫米距离；默认 `0.0` 为闭合、`1.7` 为张开。
 - `tracker_position_deadband_m`、`tracker_orientation_deadband_rad`：连续两帧内低于这些值的 Lighthouse 微抖会保持上一安全目标，避免静止 Sensor 触发 IK 分支跳变。默认分别为 2 mm 和约 1.15 度；不要用增大 `max_ik_joint_step_rad` 来掩盖持续跳变。

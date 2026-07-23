@@ -116,6 +116,9 @@ class SensorSample:
     monotonic_s: float
     tracker_pose: np.ndarray
     gripper: float
+    # Physical Pika motor target in radians. Kept separately from ``gripper``
+    # so stored data can use VLA's 0=open/1=closed convention.
+    gripper_motor_rad: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -246,6 +249,7 @@ class PikaSenseSource:
             monotonic_s=now,
             tracker_pose=np.asarray([*pose.position, *_quaternion_to_rotation_vector(pose.rotation)], dtype=np.float64),
             gripper=gripper,
+            gripper_motor_rad=float(np.clip(encoder_rad, self.cfg.gripper_closed_rad, self.cfg.gripper_open_rad)),
         )
 
     def close(self) -> None:
@@ -734,7 +738,9 @@ class LiveDemoCollector:
             self.source.connect()
             self.robot.connect()
             self.gripper.connect()
-            self.cameras.start()
+            # Keep both RealSense streams closed during free teleoperation.
+            # They are needed only while an episode is being recorded, and
+            # otherwise compete with the Pika USB serial devices unnecessarily.
 
             initial_sample = self.source.sample()
             sensor_anchor = pose_to_matrix(initial_sample.tracker_pose)
@@ -768,18 +774,18 @@ class LiveDemoCollector:
             # the configured step ceiling and physical joint-speed limit.
             max_joint_step = min(
                 self.cfg.demo.max_ik_joint_step_rad,
-                self.cfg.robot.max_joint_step_rad,
-                self.cfg.robot.max_joint_speed_rad_s * period,
+                self.cfg.demo.teleop_joint_speed_rad_s * period,
             )
             next_tick = time.monotonic()
             index = 0
             last_joint_rate_log = 0.0
-            last_gripper_rate_log = 0.0
             if on_ready is not None:
                 on_ready()
 
             while not stop_event.is_set():
                 if record_event.is_set() and pending is None:
+                    LOG.info("Starting cameras for live demo recording")
+                    self.cameras.start()
                     pending = PendingEpisode(self.cfg.demo.staging_dir)
                     index = 0
                     LOG.info("Live demo recording started: %s", pending.path)
@@ -791,7 +797,39 @@ class LiveDemoCollector:
                         on_recording_stopped(completed)
                     else:
                         completed.discard()
+                    LOG.info("Stopping cameras after live demo recording")
+                    self.cameras.stop()
                 sample = self.source.sample()
+
+                # Keep the Pika serial path ahead of all RTDE/IK and camera
+                # work.  RobotControl commands the gripper immediately after
+                # reading the Sensor; doing it after getInverseKinematics()
+                # can delay a hand close whenever the robot call stalls.
+                gripper_target = self.cfg.gripper.policy_min + sample.gripper * (
+                    self.cfg.gripper.policy_max - self.cfg.gripper.policy_min
+                )
+                motor_target = (
+                    sample.gripper_motor_rad
+                    if sample.gripper_motor_rad is not None
+                    else self.cfg.gripper.min_angle_rad
+                    + (1.0 - sample.gripper) * (
+                        self.cfg.gripper.max_angle_rad - self.cfg.gripper.min_angle_rad
+                    )
+                )
+                self.gripper.set_motor_angle(motor_target)
+                if abs(gripper_target - previous_gripper) >= 0.01:
+                    feedback = self.gripper.motor_feedback() or {}
+                    LOG.info(
+                        "Pika gripper command sent: Sensor policy=%.3f -> target=%.3f rad; "
+                        "raw=%.3f rad actual=%.3f rad speed=%.3f rad/s current=%s mA voltage=%s V",
+                        gripper_target,
+                        motor_target,
+                        float(sample.gripper_motor_rad if sample.gripper_motor_rad is not None else float("nan")),
+                        float(feedback.get("Position", float("nan"))),
+                        float(feedback.get("Speed", float("nan"))),
+                        feedback.get("Current", "?"),
+                        feedback.get("Voltage", "?"),
+                    )
                 sensor_pose = pose_to_matrix(sample.tracker_pose) @ sensor_to_tool
                 tracker_translation, tracker_rotation = tracker_pose_change(previous_sensor_pose, sensor_pose)
                 is_tracker_jitter = (
@@ -835,20 +873,6 @@ class LiveDemoCollector:
                 if np.any(joint_target < lower) or np.any(joint_target > upper):
                     raise RuntimeError("Pika teleoperation target violates configured UR joint limits")
 
-                requested_gripper_target = self.cfg.gripper.policy_min + sample.gripper * (
-                    self.cfg.gripper.policy_max - self.cfg.gripper.policy_min
-                )
-                gripper_target, gripper_step = clamp_scalar_step(
-                    requested_gripper_target, previous_gripper, self.cfg.demo.max_gripper_step
-                )
-                if gripper_step > self.cfg.demo.max_gripper_step and time.monotonic() - last_gripper_rate_log > 1.0:
-                    LOG.warning(
-                        "Rate-limiting Pika gripper: %.3f requested, %.3f allowed per frame",
-                        gripper_step,
-                        self.cfg.demo.max_gripper_step,
-                    )
-                    last_gripper_rate_log = time.monotonic()
-
                 action = np.concatenate([joint_target, np.asarray([gripper_target])])
                 if pending is not None:
                     joints = self.robot.joints()
@@ -863,8 +887,14 @@ class LiveDemoCollector:
                         self.cfg.demo.image_width,
                         self.cfg.demo.image_height,
                     )
-                self.robot.send_target(joint_target, period_s=period)
-                self.gripper.apply(action)
+                self.robot.send_target(
+                    joint_target,
+                    period_s=period,
+                    speed_rad_s=self.cfg.demo.teleop_joint_speed_rad_s,
+                    acceleration_rad_s2=self.cfg.demo.teleop_joint_acceleration_rad_s2,
+                    lookahead_s=self.cfg.demo.teleop_servo_lookahead_s,
+                    gain=self.cfg.demo.teleop_servo_gain,
+                )
                 previous_target = joint_target
                 previous_gripper = gripper_target
                 if pending is not None:

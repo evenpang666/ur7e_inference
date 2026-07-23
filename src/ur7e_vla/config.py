@@ -147,6 +147,16 @@ class DemoConfig:
     sensor_to_tool_rpy: list[float] = field(default_factory=lambda: [0.0, 1.5707963267948966, 0.0])
     translation_scale: float = 1.0
     rotation_scale: float = 1.0
+    # Dedicated live-teleoperation servo settings.  They intentionally do
+    # not change the more conservative VLA policy execution limits.
+    teleop_joint_speed_rad_s: float = 1.50
+    teleop_joint_acceleration_rad_s2: float = 0.50
+    teleop_servo_lookahead_s: float = 0.20
+    teleop_servo_gain: int = 100
+    # Pika position commands are asynchronous. Coalesce raw teleop targets
+    # so old commands cannot build up in the controller firmware.
+    teleop_gripper_command_hz: float = 5.0
+    teleop_gripper_deadband_rad: float = 0.05
     max_translation_m: float = 0.50
     max_rotation_rad: float = 3.142
     # Ignore tiny Lighthouse pose changes between commands. This keeps tracker
@@ -252,6 +262,14 @@ class AppConfig:
             raise ValueError("demo approach joint speed and acceleration must be positive")
         if self.demo.approach_settle_s < 0:
             raise ValueError("demo.approach_settle_s must not be negative")
+        if self.demo.teleop_joint_speed_rad_s <= 0 or self.demo.teleop_joint_acceleration_rad_s2 <= 0:
+            raise ValueError("demo teleoperation joint speed and acceleration must be positive")
+        if self.demo.teleop_servo_lookahead_s <= 0 or self.demo.teleop_servo_gain <= 0:
+            raise ValueError("demo teleoperation servo lookahead and gain must be positive")
+        if self.demo.teleop_gripper_command_hz <= 0:
+            raise ValueError("demo.teleop_gripper_command_hz must be positive")
+        if self.demo.teleop_gripper_deadband_rad < 0:
+            raise ValueError("demo.teleop_gripper_deadband_rad cannot be negative")
         if self.demo.gripper_distance_max_mm <= self.demo.gripper_distance_min_mm:
             raise ValueError("demo gripper distance range is invalid")
         if self.demo.gripper_open_rad <= self.demo.gripper_closed_rad:
