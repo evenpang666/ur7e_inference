@@ -59,4 +59,22 @@ ur7e-vla list-cameras
 python scripts/probe_policy.py --host 192.168.124.15 --port 8000
 ```
 
+## 启动交互式 VLA 推理
+
+策略服务通过探测后，可在机器人端启动图形界面：
+
+```powershell
+ur7e-vla vla-gui --config config.yaml
+```
+
+此命令是 dry-run。只有在确认急停可达、工作空间清空后，才添加 `--execute`：
+
+```powershell
+ur7e-vla vla-gui --config config.yaml --execute
+```
+
+界面依赖 Python 自带的 Tk 图形组件；若启动时报 `No module named tkinter`，请为当前
+Python/conda 环境安装或启用 Tk。MP4 录制使用项目的 OpenCV 依赖，并写入
+`runtime.recording_dir`（默认 `recordings`）。
+
 在 `config.yaml` 配置 Pika 串口、两路相机和 UR 地址。机器人主机必须能同时访问 UR7e 的 `169.254.175.10` 与推理主机的 `192.168.124.15`；通常需要两张网卡或正确的静态路由。

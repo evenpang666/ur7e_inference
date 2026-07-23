@@ -73,6 +73,44 @@ def matrix_to_pose(matrix: np.ndarray) -> np.ndarray:
     return np.concatenate([matrix[:3, 3], matrix_to_rotation_vector(matrix[:3, :3])])
 
 
+def tracker_pose_change(previous: np.ndarray, current: np.ndarray) -> tuple[float, float]:
+    """Return translation (m) and rotation (rad) between two tracker transforms."""
+    delta = np.linalg.inv(np.asarray(previous, dtype=np.float64)) @ np.asarray(current, dtype=np.float64)
+    return float(np.linalg.norm(delta[:3, 3])), float(np.linalg.norm(matrix_to_rotation_vector(delta[:3, :3])))
+
+
+def clamp_joint_target_step(target: np.ndarray, previous: np.ndarray, max_step_rad: float) -> tuple[np.ndarray, float]:
+    """Rate-limit an IK target without allowing a 2π representation jump.
+
+    This matches RobotControl's servoJ behaviour: an unreachable-in-one-tick
+    Cartesian target is approached over several safe servo ticks rather than
+    aborting collection or commanding the full joint discontinuity.
+    """
+    target = np.asarray(target, dtype=np.float64).copy()
+    previous = np.asarray(previous, dtype=np.float64)
+    if target.shape != (6,) or previous.shape != (6,) or max_step_rad <= 0:
+        raise ValueError("Joint targets must be six-dimensional and max_step_rad must be positive")
+    delta = target - previous
+    delta = (delta + math.pi) % (2.0 * math.pi) - math.pi
+    unclamped_step = float(np.max(np.abs(delta)))
+    return previous + np.clip(delta, -max_step_rad, max_step_rad), unclamped_step
+
+
+def clamp_scalar_step(target: float, previous: float, max_step: float) -> tuple[float, float]:
+    """Limit a normalized gripper command to one safe control-tick step."""
+    if max_step <= 0:
+        raise ValueError("max_step must be positive")
+    requested_step = float(target - previous)
+    return previous + float(np.clip(requested_step, -max_step, max_step)), abs(requested_step)
+
+
+def normalize_pika_encoder_angle(angle_rad: float, cfg: DemoConfig) -> float:
+    """Map raw Pika Sense encoder radians to the dataset gripper convention."""
+    normalized = (float(angle_rad) - cfg.gripper_closed_rad) / (cfg.gripper_open_rad - cfg.gripper_closed_rad)
+    normalized = float(np.clip(normalized, 0.0, 1.0))
+    return 1.0 - normalized if cfg.gripper_invert else normalized
+
+
 @dataclass(frozen=True)
 class SensorSample:
     monotonic_s: float
@@ -194,11 +232,16 @@ class PikaSenseSource:
             self._last_update_monotonic = now
         if now - self._last_update_monotonic > self.cfg.max_tracker_age_s:
             raise TimeoutError(f"Tracker pose is stale for {now - self._last_update_monotonic:.3f}s")
-        distance = float(self._sense.get_gripper_distance())
-        span = self.cfg.gripper_distance_max_mm - self.cfg.gripper_distance_min_mm
-        gripper = float(np.clip((distance - self.cfg.gripper_distance_min_mm) / span, 0.0, 1.0))
-        if self.cfg.gripper_invert:
-            gripper = 1.0 - gripper
+        # RobotControl forwards the AS5047 encoder angle straight to the Pika
+        # motor.  Do not convert it through the SDK's estimated finger-tip
+        # distance: that geometry is nonlinear and caused a closed Sensor to
+        # map to a non-closed motor target.
+        encoder = self._sense.get_encoder_data()
+        try:
+            encoder_rad = float(encoder["rad"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"Pika Sense returned invalid encoder data: {encoder!r}") from exc
+        gripper = normalize_pika_encoder_angle(encoder_rad, self.cfg)
         return SensorSample(
             monotonic_s=now,
             tracker_pose=np.asarray([*pose.position, *_quaternion_to_rotation_vector(pose.rotation)], dtype=np.float64),
@@ -663,7 +706,7 @@ def save_pending_episode(pending: PendingEpisode, task: str, cfg: DemoConfig) ->
 
 
 class LiveDemoCollector:
-    """Direct Pika Sense teleoperation with simultaneous LeRobot staging.
+    """Direct Pika Sense teleoperation with independently controlled staging.
 
     The first valid sensor pose and current TCP pose form a session anchor.
     Subsequent Pika motion is mapped relatively, as in RobotControl's teleop,
@@ -680,9 +723,12 @@ class LiveDemoCollector:
     def run(
         self,
         stop_event: threading.Event,
+        record_event: threading.Event,
+        on_recording_stopped: Callable[[PendingEpisode], None],
+        on_ready: Optional[Callable[[], None]] = None,
         on_frame: Optional[Callable[[int], None]] = None,
-    ) -> PendingEpisode:
-        pending = PendingEpisode(self.cfg.demo.staging_dir)
+    ) -> None:
+        pending: Optional[PendingEpisode] = None
         period = 1.0 / self.cfg.demo.fps
         try:
             self.source.connect()
@@ -695,6 +741,7 @@ class LiveDemoCollector:
             sensor_to_tool = np.eye(4)
             sensor_to_tool[:3, :3] = rpy_to_matrix(*self.cfg.demo.sensor_to_tool_rpy)
             sensor_anchor = sensor_anchor @ sensor_to_tool
+            previous_sensor_pose = sensor_anchor
             robot_anchor = pose_to_matrix(self.robot.tcp_pose())
             previous_target = self.robot.joints()
             # Match RobotControl's direct hand-to-gripper behavior at enable:
@@ -703,77 +750,141 @@ class LiveDemoCollector:
             previous_gripper = self.cfg.gripper.policy_min + initial_sample.gripper * (
                 self.cfg.gripper.policy_max - self.cfg.gripper.policy_min
             )
+            initial_motor_normalized = (previous_gripper - self.cfg.gripper.policy_min) / (
+                self.cfg.gripper.policy_max - self.cfg.gripper.policy_min
+            )
+            if self.cfg.gripper.invert:
+                initial_motor_normalized = 1.0 - initial_motor_normalized
+            LOG.info(
+                "Pika gripper live mapping: Sensor encoder policy=%.3f -> motor target=%.3f rad",
+                initial_sample.gripper,
+                self.cfg.gripper.min_angle_rad
+                + initial_motor_normalized * (self.cfg.gripper.max_angle_rad - self.cfg.gripper.min_angle_rad),
+            )
             lower = np.asarray(self.cfg.robot.joint_min_rad)
             upper = np.asarray(self.cfg.robot.joint_max_rad)
-            max_joint_step = min(self.cfg.demo.max_ik_joint_step_rad, self.cfg.robot.max_joint_step_rad)
+            # RobotControl rate-limits servoJ targets instead of treating an
+            # ordinary tracker update as a fatal error.  Use the stricter of
+            # the configured step ceiling and physical joint-speed limit.
+            max_joint_step = min(
+                self.cfg.demo.max_ik_joint_step_rad,
+                self.cfg.robot.max_joint_step_rad,
+                self.cfg.robot.max_joint_speed_rad_s * period,
+            )
             next_tick = time.monotonic()
             index = 0
+            last_joint_rate_log = 0.0
+            last_gripper_rate_log = 0.0
+            if on_ready is not None:
+                on_ready()
 
             while not stop_event.is_set():
+                if record_event.is_set() and pending is None:
+                    pending = PendingEpisode(self.cfg.demo.staging_dir)
+                    index = 0
+                    LOG.info("Live demo recording started: %s", pending.path)
+                elif not record_event.is_set() and pending is not None:
+                    completed = pending
+                    pending = None
+                    if completed.frames:
+                        LOG.info("Live demo recording stopped with %d frames", len(completed.frames))
+                        on_recording_stopped(completed)
+                    else:
+                        completed.discard()
                 sample = self.source.sample()
                 sensor_pose = pose_to_matrix(sample.tracker_pose) @ sensor_to_tool
-                delta = np.linalg.inv(sensor_anchor) @ sensor_pose
-                translation = delta[:3, 3] * self.cfg.demo.translation_scale
-                rotation_vector = matrix_to_rotation_vector(delta[:3, :3]) * self.cfg.demo.rotation_scale
-                if np.linalg.norm(translation) > self.cfg.demo.max_translation_m:
-                    raise RuntimeError("Pika translation exceeds configured teleoperation workspace limit")
-                if np.linalg.norm(rotation_vector) > self.cfg.demo.max_rotation_rad:
-                    raise RuntimeError("Pika rotation exceeds configured teleoperation workspace limit")
-
-                scaled_delta = np.eye(4)
-                scaled_delta[:3, :3] = rotation_vector_to_matrix(rotation_vector)
-                scaled_delta[:3, 3] = translation
-                tcp_target = matrix_to_pose(robot_anchor @ scaled_delta)
-                joint_target = self.robot.inverse_kinematics(
-                    tcp_target,
-                    previous_target,
-                    self.cfg.demo.ik_position_tolerance_m,
-                    self.cfg.demo.ik_orientation_tolerance_rad,
+                tracker_translation, tracker_rotation = tracker_pose_change(previous_sensor_pose, sensor_pose)
+                is_tracker_jitter = (
+                    tracker_translation <= self.cfg.demo.tracker_position_deadband_m
+                    and tracker_rotation <= self.cfg.demo.tracker_orientation_deadband_rad
                 )
-                if float(np.max(np.abs(joint_target - previous_target))) > max_joint_step:
-                    raise RuntimeError(
-                        "Pika motion produces an unsafe joint step; move the sensor more slowly or increase demo FPS"
+                joint_target = previous_target
+                if not is_tracker_jitter:
+                    delta = np.linalg.inv(sensor_anchor) @ sensor_pose
+                    translation = delta[:3, 3] * self.cfg.demo.translation_scale
+                    rotation_vector = matrix_to_rotation_vector(delta[:3, :3]) * self.cfg.demo.rotation_scale
+                    if np.linalg.norm(translation) > self.cfg.demo.max_translation_m:
+                        raise RuntimeError("Pika translation exceeds configured teleoperation workspace limit")
+                    if np.linalg.norm(rotation_vector) > self.cfg.demo.max_rotation_rad:
+                        raise RuntimeError("Pika rotation exceeds configured teleoperation workspace limit")
+
+                    scaled_delta = np.eye(4)
+                    scaled_delta[:3, :3] = rotation_vector_to_matrix(rotation_vector)
+                    scaled_delta[:3, 3] = translation
+                    tcp_target = matrix_to_pose(robot_anchor @ scaled_delta)
+                    joint_target = self.robot.inverse_kinematics(
+                        tcp_target,
+                        previous_target,
+                        self.cfg.demo.ik_position_tolerance_m,
+                        self.cfg.demo.ik_orientation_tolerance_rad,
                     )
+                    joint_target, joint_step = clamp_joint_target_step(
+                        joint_target, previous_target, max_joint_step
+                    )
+                    if joint_step > max_joint_step and time.monotonic() - last_joint_rate_log > 1.0:
+                        LOG.warning(
+                            "Rate-limiting Pika IK target: %.4f rad requested, %.4f rad allowed "
+                            "(tracker change %.2f mm, %.2f deg)",
+                            joint_step,
+                            max_joint_step,
+                            tracker_translation * 1000,
+                            math.degrees(tracker_rotation),
+                        )
+                        last_joint_rate_log = time.monotonic()
+                    previous_sensor_pose = sensor_pose
                 if np.any(joint_target < lower) or np.any(joint_target > upper):
                     raise RuntimeError("Pika teleoperation target violates configured UR joint limits")
 
-                gripper_target = self.cfg.gripper.policy_min + sample.gripper * (
+                requested_gripper_target = self.cfg.gripper.policy_min + sample.gripper * (
                     self.cfg.gripper.policy_max - self.cfg.gripper.policy_min
                 )
-                if abs(gripper_target - previous_gripper) > self.cfg.demo.max_gripper_step:
-                    raise RuntimeError("Pika gripper command changes too quickly; open or close the sensor more slowly")
-
-                joints = self.robot.joints()
-                gripper_state = self.gripper.position()
-                exterior, wrist = self.cameras.frames()
-                action = np.concatenate([joint_target, np.asarray([gripper_target])])
-                pending.add(
-                    exterior,
-                    wrist,
-                    joints,
-                    gripper_state,
-                    action,
-                    self.cfg.demo.image_width,
-                    self.cfg.demo.image_height,
+                gripper_target, gripper_step = clamp_scalar_step(
+                    requested_gripper_target, previous_gripper, self.cfg.demo.max_gripper_step
                 )
+                if gripper_step > self.cfg.demo.max_gripper_step and time.monotonic() - last_gripper_rate_log > 1.0:
+                    LOG.warning(
+                        "Rate-limiting Pika gripper: %.3f requested, %.3f allowed per frame",
+                        gripper_step,
+                        self.cfg.demo.max_gripper_step,
+                    )
+                    last_gripper_rate_log = time.monotonic()
+
+                action = np.concatenate([joint_target, np.asarray([gripper_target])])
+                if pending is not None:
+                    joints = self.robot.joints()
+                    gripper_state = self.gripper.position()
+                    exterior, wrist = self.cameras.frames()
+                    pending.add(
+                        exterior,
+                        wrist,
+                        joints,
+                        gripper_state,
+                        action,
+                        self.cfg.demo.image_width,
+                        self.cfg.demo.image_height,
+                    )
                 self.robot.send_target(joint_target, period_s=period)
                 self.gripper.apply(action)
                 previous_target = joint_target
                 previous_gripper = gripper_target
-                index += 1
-                if on_frame is not None:
-                    on_frame(index)
+                if pending is not None:
+                    index += 1
+                    if on_frame is not None:
+                        on_frame(index)
                 next_tick += period
                 stop_event.wait(max(0.0, next_tick - time.monotonic()))
 
-            self.robot.stop_servo()
-            if not pending.frames:
-                raise RuntimeError("No live demo frames were captured")
-            return pending
         except BaseException:
-            pending.discard()
+            if pending is not None:
+                pending.discard()
+                pending = None
             raise
         finally:
+            if pending is not None:
+                if pending.frames:
+                    on_recording_stopped(pending)
+                else:
+                    pending.discard()
             try:
                 self.robot.stop()
             finally:

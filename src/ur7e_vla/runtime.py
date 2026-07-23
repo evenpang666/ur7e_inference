@@ -3,8 +3,9 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import math
+import threading
 import time
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 
@@ -27,21 +28,86 @@ class VLARuntime:
         self.cameras = CameraPair(cfg.cameras)
         self.policy: Optional[OpenPIPolicy] = None
         self.recorder: Optional[VideoRecorder] = None
+        self._recorder_lock = threading.Lock()
+        self._task_lock = threading.Lock()
+        self._active_task = ""
+        self._dynamic_task = False
+        self._last_logged_policy_prompt: Optional[str] = None
+        self._task_update_requested = threading.Event()
         self._stop = False
 
     def request_stop(self) -> None:
         self._stop = True
 
+    def set_task(self, task: str) -> None:
+        """Use ``task`` for the next policy observation in a live GUI session."""
+        task = task.strip()
+        if not task:
+            raise ValueError("Task instruction cannot be empty")
+        if not self._dynamic_task:
+            raise RuntimeError("Task can only be updated in a dynamic GUI session")
+        with self._task_lock:
+            self._active_task = task
+        self._task_update_requested.set()
+        LOG.info("VLA task updated; the next policy observation will use prompt=%r", task)
+
+    def _consume_task_update(self) -> bool:
+        if not self._task_update_requested.is_set():
+            return False
+        self._task_update_requested.clear()
+        return True
+
+    def _task_for_observation(self, fallback: str) -> str:
+        if not self._dynamic_task:
+            return fallback
+        with self._task_lock:
+            return self._active_task
+
+    def start_video_recording(self) -> str:
+        """Start an MP4 capture while an already-connected runtime is active."""
+        with self._recorder_lock:
+            if self.recorder is not None:
+                if self.recorder.output_path is None:
+                    raise RuntimeError("Video recorder has no output path")
+                return str(self.recorder.output_path)
+            recorder = VideoRecorder(
+                self.cameras.frames,
+                self.cfg.runtime.recording_dir,
+                self.cfg.runtime.recording_fps,
+            )
+            output = recorder.start()
+            self.recorder = recorder
+            return str(output)
+
+    def stop_video_recording(self) -> Optional[str]:
+        """Stop the active MP4 capture, leaving policy inference running."""
+        with self._recorder_lock:
+            recorder, self.recorder = self.recorder, None
+        if recorder is None:
+            return None
+        recorder.stop()
+        return str(recorder.output_path) if recorder.output_path is not None else None
+
+    def _check_recorder(self) -> None:
+        with self._recorder_lock:
+            recorder = self.recorder
+        if recorder is not None:
+            recorder.check()
+
     def _observation(self, task: str) -> dict:
         exterior, wrist = self.cameras.frames()
         joints = self.robot.joints()
         pcfg = self.cfg.policy
+        prompt = self._task_for_observation(task)
+        if prompt != self._last_logged_policy_prompt:
+            LOG.info("Sending policy observation with prompt=%r", prompt)
+            self._last_logged_policy_prompt = prompt
         return {
             pcfg.exterior_image_key: resize_with_pad(exterior, pcfg.image_size),
             pcfg.wrist_image_key: resize_with_pad(wrist, pcfg.image_size),
             pcfg.joint_state_key: joints.astype(np.float32),
             pcfg.gripper_state_key: np.asarray([self.gripper.position()], dtype=np.float32),
-            "prompt": task,
+            "prompt": prompt,
         }
 
     def _infer(self, observation: dict) -> tuple[np.ndarray, float]:
@@ -247,13 +313,20 @@ class VLARuntime:
             for action in actions[:steps]:
                 if not self._keep_running(self._stop, deadline):
                     break
-                if self.recorder is not None:
-                    self.recorder.check()
+                if self._consume_task_update():
+                    LOG.info("Discarding remaining synchronous actions after task update")
+                    break
+                self._check_recorder()
                 tick = time.monotonic()
                 target = self._execute_action(action)
                 action_count += 1
                 if action_count % self.cfg.runtime.log_every_n_actions == 0:
-                    LOG.info("Task %r applied %d actions; target=%s", task, action_count, np.round(target, 4).tolist())
+                    LOG.info(
+                        "Task %r applied %d actions; target=%s",
+                        self._task_for_observation(task),
+                        action_count,
+                        np.round(target, 4).tolist(),
+                    )
                 remaining = period - (time.monotonic() - tick)
                 if remaining > 0:
                     time.sleep(remaining)
@@ -290,6 +363,12 @@ class VLARuntime:
                 if request_step is None:
                     raise RuntimeError("Missing control-step timestamp for async inference request")
                 incoming = self._log_inference(future.result())
+                if self._consume_task_update():
+                    LOG.info("Discarding completed old-task inference and requesting the updated task")
+                    queue = queue[:0]
+                    request_step = control_step_count
+                    future = executor.submit(self._infer, self._observation(task))
+                    continue
                 elapsed = control_step_count - request_step
                 if elapsed >= incoming.shape[0]:
                     raise RuntimeError(
@@ -307,16 +386,27 @@ class VLARuntime:
                 future = None
                 request_step = None
 
+            if future is None and self._consume_task_update():
+                LOG.info("Discarding queued actions and requesting updated task inference")
+                queue = queue[:0]
+                request_step = control_step_count
+                future = executor.submit(self._infer, self._observation(task))
+                continue
+
             if queue.shape[0]:
-                if self.recorder is not None:
-                    self.recorder.check()
+                self._check_recorder()
                 tick = time.monotonic()
                 action, queue = queue[0], queue[1:]
                 last_target = self._execute_action(action)
                 action_count += 1
                 control_step_count += 1
                 if action_count % self.cfg.runtime.log_every_n_actions == 0:
-                    LOG.info("Task %r applied %d actions; target=%s", task, action_count, np.round(last_target, 4).tolist())
+                    LOG.info(
+                        "Task %r applied %d actions; target=%s",
+                        self._task_for_observation(task),
+                        action_count,
+                        np.round(last_target, 4).tolist(),
+                    )
                 if future is None and queue.shape[0] <= int(np.ceil(chunk_size * self.cfg.policy.async_queue_trigger_fraction)):
                     request_step = control_step_count
                     future = executor.submit(self._infer, self._observation(task))
@@ -330,8 +420,7 @@ class VLARuntime:
             # the in-flight request returns, while counting elapsed action time.
             if future is None:
                 raise RuntimeError("Async action queue emptied without an inference request")
-            if self.recorder is not None:
-                self.recorder.check()
+            self._check_recorder()
             tick = time.monotonic()
             if last_target is not None:
                 self.robot.send_target(last_target)
@@ -378,8 +467,7 @@ class VLARuntime:
             for step_index, action in enumerate(current_actions[:steps], start=1):
                 if not self._keep_running(self._stop, deadline):
                     break
-                if self.recorder is not None:
-                    self.recorder.check()
+                self._check_recorder()
                 tick = time.monotonic()
                 current = self.robot.joints()
                 target = self.robot.action_to_target(action, current)
@@ -393,7 +481,12 @@ class VLARuntime:
                     next_observation_step = control_step_count
                     next_future = executor.submit(self._infer, observation)
                 if action_count % self.cfg.runtime.log_every_n_actions == 0:
-                    LOG.info("Task %r applied %d actions; target=%s", task, action_count, np.round(target, 4).tolist())
+                    LOG.info(
+                        "Task %r applied %d actions; target=%s",
+                        self._task_for_observation(task),
+                        action_count,
+                        np.round(target, 4).tolist(),
+                    )
                 remaining = period - (time.monotonic() - tick)
                 if remaining > 0:
                     time.sleep(remaining)
@@ -405,8 +498,7 @@ class VLARuntime:
                 next_observation_step = control_step_count
                 next_future = executor.submit(self._infer, observation)
             while not next_future.done() and self._keep_running(self._stop, deadline):
-                if self.recorder is not None:
-                    self.recorder.check()
+                self._check_recorder()
                 tick = time.monotonic()
                 if last_target is not None:
                     self.robot.send_target(last_target)
@@ -424,13 +516,23 @@ class VLARuntime:
         LOG.info("Task %r finished after %.2fs, %d action steps, %d hold steps", task, time.monotonic() - execution_start, action_count, hold_count)
         return action_count, hold_count
 
-    def run(self, task: str, duration_s: Optional[float] = None) -> None:
+    def run(
+        self,
+        task: str,
+        duration_s: Optional[float] = None,
+        on_ready: Optional[Callable[[], None]] = None,
+        dynamic_task: bool = False,
+    ) -> None:
         if duration_s is not None and duration_s <= 0:
             raise ValueError("duration must be positive or omitted")
+        self._dynamic_task = dynamic_task
+        self._task_update_requested.clear()
+        with self._task_lock:
+            self._active_task = task
         if duration_s is None:
             # Retain the established unlimited single-task mode.
-            return self._run_tasks([(task, None)])
-        self._run_tasks([(task, duration_s)])
+            return self._run_tasks([(task, None)], on_ready=on_ready)
+        self._run_tasks([(task, duration_s)], on_ready=on_ready)
 
     def run_sequence(self, steps: Sequence[TaskStep]) -> None:
         if not steps:
@@ -440,7 +542,11 @@ class VLARuntime:
                 raise ValueError(f"Invalid task sequence step {index}: task must be non-empty and duration positive")
         self._run_tasks([(step.task, step.duration_s) for step in steps])
 
-    def _run_tasks(self, steps: Sequence[tuple[str, Optional[float]]]) -> None:
+    def _run_tasks(
+        self,
+        steps: Sequence[tuple[str, Optional[float]]],
+        on_ready: Optional[Callable[[], None]] = None,
+    ) -> None:
         invocation_start = time.monotonic()
         executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
         total_actions = 0
@@ -451,14 +557,11 @@ class VLARuntime:
             self.gripper.connect()
             self.cameras.start()
             if self.cfg.runtime.record_video:
-                self.recorder = VideoRecorder(
-                    self.cameras.frames,
-                    self.cfg.runtime.recording_dir,
-                    self.cfg.runtime.recording_fps,
-                )
-                self.recorder.start()
+                self.start_video_recording()
             self.policy = OpenPIPolicy(self.cfg.policy)
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="policy-inference")
+            if on_ready is not None:
+                on_ready()
             for index, (task, duration_s) in enumerate(steps, start=1):
                 if self._stop:
                     break
@@ -485,8 +588,7 @@ class VLARuntime:
                     self.gripper.stop()
                 finally:
                     try:
-                        if self.recorder is not None:
-                            self.recorder.stop()
+                        self.stop_video_recording()
                     finally:
                         try:
                             self.cameras.stop()

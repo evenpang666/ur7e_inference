@@ -61,11 +61,16 @@ class CameraConfig:
 class GripperConfig:
     enabled: bool = True
     serial_port: str = "/dev/ttyUSB1"
+    # Pika firmware needs a short period after ENABLE before it accepts a
+    # position command. The vendor example waits one second.
+    enable_settle_s: float = 1.0
     action_index: int = 6
     policy_min: float = 0.0
     policy_max: float = 1.0
     min_angle_rad: float = 0.0
-    max_angle_rad: float = 1.0
+    # Pika's usable motor range is approximately 0 rad (closed) to 1.7 rad
+    # (open).  A smaller range makes an otherwise valid command look inert.
+    max_angle_rad: float = 1.7
     # Dataset convention: policy_max means closed. Set true when increasing
     # the physical motor angle opens the Pika gripper.
     invert: bool = True
@@ -129,6 +134,11 @@ class DemoConfig:
     approach_settle_s: float = 0.25
     gripper_distance_min_mm: float = 0.0
     gripper_distance_max_mm: float = 85.0
+    # Pika Sense AS5047 encoder range.  Live teleoperation maps this raw
+    # angle directly to the Pika motor, matching RobotControl.  The older
+    # distance fields above are retained only for compatibility with old YAML.
+    gripper_closed_rad: float = 0.0
+    gripper_open_rad: float = 1.7
     # Pika Sense reports a larger opening distance for an open hand. Invert it
     # so demonstrations use closed=1 and open=0.
     gripper_invert: bool = True
@@ -139,6 +149,11 @@ class DemoConfig:
     rotation_scale: float = 1.0
     max_translation_m: float = 0.50
     max_rotation_rad: float = 3.142
+    # Ignore tiny Lighthouse pose changes between commands. This keeps tracker
+    # jitter from making IK select a different joint branch while the Sensor is
+    # physically stationary.
+    tracker_position_deadband_m: float = 0.002
+    tracker_orientation_deadband_rad: float = 0.02
     max_ik_joint_step_rad: float = 0.02
     max_gripper_step: float = 0.10
     ik_position_tolerance_m: float = 1e-6
@@ -203,6 +218,8 @@ class AppConfig:
             raise ValueError("invalid gripper action index or physical angle range")
         if self.gripper.policy_max <= self.gripper.policy_min:
             raise ValueError("gripper.policy_max must exceed policy_min")
+        if self.gripper.enable_settle_s < 0:
+            raise ValueError("gripper.enable_settle_s cannot be negative")
         if self.runtime.log_every_n_actions <= 0:
             raise ValueError("runtime.log_every_n_actions must be positive")
         if self.runtime.recording_fps <= 0:
@@ -237,12 +254,16 @@ class AppConfig:
             raise ValueError("demo.approach_settle_s must not be negative")
         if self.demo.gripper_distance_max_mm <= self.demo.gripper_distance_min_mm:
             raise ValueError("demo gripper distance range is invalid")
+        if self.demo.gripper_open_rad <= self.demo.gripper_closed_rad:
+            raise ValueError("demo gripper encoder range is invalid")
         if len(self.demo.sensor_to_tool_rpy) != 3:
             raise ValueError("demo.sensor_to_tool_rpy must contain roll, pitch, yaw")
         if self.demo.translation_scale <= 0 or self.demo.rotation_scale <= 0:
             raise ValueError("demo pose scales must be positive")
         if self.demo.max_translation_m <= 0 or self.demo.max_rotation_rad <= 0:
             raise ValueError("demo workspace limits must be positive")
+        if self.demo.tracker_position_deadband_m < 0 or self.demo.tracker_orientation_deadband_rad < 0:
+            raise ValueError("demo tracker deadbands must not be negative")
         if self.demo.max_ik_joint_step_rad <= 0:
             raise ValueError("demo.max_ik_joint_step_rad must be positive")
         if self.demo.max_gripper_step <= 0:

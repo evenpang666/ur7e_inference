@@ -49,11 +49,12 @@ cameras:
 gripper:
   enabled: true
   serial_port: "/dev/ttyUSB1"
+  enable_settle_s: 1.0          # wait after Pika motor enable before first target
   action_index: 6
   policy_min: 0.0              # mani_real convention: open = 0
   policy_max: 1.0              # mani_real convention: closed = 1
   min_angle_rad: 0.0
-  max_angle_rad: 1.0
+  max_angle_rad: 1.7            # Pika physical open limit; 0 = closed
   # Paired with demo.gripper_invert: physical hand-to-gripper direction is
   # unchanged; only stored policy values become open=0, closed=1.
   invert: true
@@ -93,6 +94,9 @@ demo:
   max_tracker_age_s: 0.25
   gripper_distance_min_mm: 0.0
   gripper_distance_max_mm: 85.0
+  # Live teleop uses this raw AS5047 encoder-angle range, as RobotControl does.
+  gripper_closed_rad: 0.0
+  gripper_open_rad: 1.7
   # Paired with gripper.invert: Sensor opening distance is stored as
   # policy open=0, closed=1 without changing physical teleoperation direction.
   gripper_invert: true
@@ -102,6 +106,9 @@ demo:
   rotation_scale: 1.0
   max_translation_m: 0.50
   max_rotation_rad: 3.142
+  # Suppress Lighthouse micro-jitter while the Sensor is held still.
+  tracker_position_deadband_m: 0.002
+  tracker_orientation_deadband_rad: 0.02
   max_ik_joint_step_rad: 0.02
   max_gripper_step: 0.10
   ik_position_tolerance_m: 0.000001

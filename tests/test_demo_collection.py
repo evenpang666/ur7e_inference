@@ -10,14 +10,18 @@ from ur7e_vla.demo_collection import (
     PendingEpisode,
     PikaSenseSource,
     SensorSample,
+    clamp_joint_target_step,
+    clamp_scalar_step,
     find_dataset_for_task,
     map_calibrated_tracker_trajectory,
     map_tracker_trajectory,
     matrix_to_pose,
+    normalize_pika_encoder_angle,
     normalize_task,
     pose_to_matrix,
     rpy_to_matrix,
     solve_sensor_to_tcp_hand_eye,
+    tracker_pose_change,
 )
 
 
@@ -27,10 +31,11 @@ def test_lighthouse_objects_are_not_valid_tracker_candidates():
     assert not PikaSenseSource._is_lighthouse("WM0")
 
 
-def test_collect_demo_cli_requires_explicit_execute():
+def test_collect_demo_cli_allows_task_entry_in_gui_and_requires_explicit_execute():
     args = build_parser().parse_args(["collect-demo", "--task", "pick cube"])
     assert args.task == "pick cube"
     assert args.execute is False
+    assert build_parser().parse_args(["collect-demo"]).task == ""
 
 
 def test_pose_matrix_round_trip():
@@ -42,6 +47,36 @@ def test_sensor_to_tool_rotation_matches_robotcontrol_default():
     rotation = rpy_to_matrix(0.0, np.pi / 2.0, 0.0)
     assert np.allclose(rotation @ [1.0, 0.0, 0.0], [0.0, 0.0, -1.0], atol=1e-8)
     assert np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-8)
+
+
+def test_tracker_pose_change_reports_rigid_motion():
+    previous = np.eye(4)
+    current = pose_to_matrix(np.asarray([0.003, 0.004, 0.0, 0.0, 0.0, 0.03]))
+    translation, rotation = tracker_pose_change(previous, current)
+    assert np.isclose(translation, 0.005)
+    assert np.isclose(rotation, 0.03)
+
+
+def test_joint_target_is_rate_limited_and_wraps_equivalent_angles():
+    target, requested = clamp_joint_target_step(
+        np.asarray([2 * np.pi - 0.01, 0.1, 0.0, 0.0, 0.0, 0.0]),
+        np.zeros(6),
+        0.02,
+    )
+    assert np.isclose(requested, 0.1)
+    assert np.allclose(target, [-0.01, 0.02, 0.0, 0.0, 0.0, 0.0])
+
+
+def test_gripper_target_is_rate_limited_instead_of_rejected():
+    target, requested = clamp_scalar_step(1.0, 0.25, 0.1)
+    assert requested == 0.75
+    assert target == 0.35
+
+
+def test_pika_encoder_mapping_matches_direct_motor_convention():
+    cfg = DemoConfig(gripper_closed_rad=0.0, gripper_open_rad=1.7, gripper_invert=False)
+    assert normalize_pika_encoder_angle(0.0, cfg) == 0.0
+    assert normalize_pika_encoder_angle(1.7, cfg) == 1.0
 
 
 def test_default_gripper_convention_is_closed_one_open_zero():

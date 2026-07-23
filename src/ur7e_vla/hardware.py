@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import numpy as np
 
@@ -159,6 +160,9 @@ class PikaGripper:
             raise RuntimeError(f"Cannot connect to Pika gripper at {self.cfg.serial_port}")
         if self.execute and not self._device.enable():
             raise RuntimeError("Pika gripper motor enable failed")
+        if self.execute and self.cfg.enable_settle_s:
+            LOG.info("Waiting %.2fs for Pika gripper enable", self.cfg.enable_settle_s)
+            time.sleep(self.cfg.enable_settle_s)
 
     def position(self) -> float:
         if self._device is not None:
@@ -187,8 +191,15 @@ class PikaGripper:
         if self.execute:
             if self._device is None:
                 raise RuntimeError("Pika gripper is not connected")
-            if self._device.set_motor_angle(angle) is False:
+            accepted = self._device.set_motor_angle(angle)
+            if accepted is False:
                 raise RuntimeError("Pika gripper rejected target angle")
+            LOG.info(
+                "Pika gripper command: policy=%.4f motor_rad=%.4f accepted=%s",
+                policy_value,
+                angle,
+                accepted,
+            )
 
     def stop(self) -> None:
         if self._device is not None:

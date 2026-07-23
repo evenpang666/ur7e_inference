@@ -26,11 +26,23 @@ demo:
 - `pika_sense_port`：Pika Sense 串口；`tracker_device` 可指定 Tracker 名称。
 - `gripper_distance_min_mm/max_mm`、`translation_scale`、`rotation_scale`：按当前设备标定。
 - `sensor_to_tool_rpy`：Sensor 到工具坐标的固定旋转，默认值与 `RobotControl` 一致。
-- `max_translation_m`、`max_rotation_rad`、`max_ik_joint_step_rad`、`max_gripper_step`：真机安全边界。
+- `max_translation_m`、`max_rotation_rad`、`max_ik_joint_step_rad`、`max_gripper_step`：真机安全边界。实时 IK 目标按 `min(max_ik_joint_step_rad, robot.max_joint_step_rad, robot.max_joint_speed_rad_s / demo.fps)` 限速；超出时会分多帧安全逼近，而不是中止采集。
+- `gripper.max_angle_rad`：Pika 夹爪电机通常使用 `0.0`（闭合）至约 `1.7 rad`（张开）；使用 `1.0` 会截断近 40% 行程。实时手部开合也按 `max_gripper_step` 逐帧限速。
+- `gripper_closed_rad`、`gripper_open_rad`：Pika Sense 的 AS5047 原始编码器范围。实时遥操直接以该弧度范围映射到 Pika 电机（与 RobotControl 一致），不使用非线性的估算毫米距离；默认 `0.0` 为闭合、`1.7` 为张开。
+- `tracker_position_deadband_m`、`tracker_orientation_deadband_rad`：连续两帧内低于这些值的 Lighthouse 微抖会保持上一安全目标，避免静止 Sensor 触发 IK 分支跳变。默认分别为 2 mm 和约 1.15 度；不要用增大 `max_ik_joint_step_rad` 来掩盖持续跳变。
 
 实时采集以开始时的 Sensor 位姿和 UR TCP 位姿建立相对锚点，不需要绝对 Lighthouse 到 UR 的手眼标定。`calibrate-demo` 仅保留给旧的离线轨迹回放工具。
 
 ## 运行
+
+## 与 VLA 推理 GUI 的区别
+
+`ur7e-vla collect-demo` 的窗口用于 Pika Sensor 遥操和 LeRobot episode 采集；
+`ur7e-vla vla-gui` 用于执行远程 OpenPI/VLA 策略。后者可实时更新任务文本、切换同步/
+异步推理、录制双相机视频，并提供 `Restore Initial State + Apply Task` 安全恢复流程；
+它不会生成示教数据集 episode。
+
+采集窗口将遥控与录制分离：直接在窗口输入任务描述（`--task` 仅用于预填），再点击 **Start Teleoperation**；遥控已启动后才能点击 **Start Recording**。点击 **Stop Recording** 只结束当前 episode 的暂存，机械臂与夹爪仍保持遥控；必须点击 **Pause Teleoperation** 才会停止伺服并断开硬件。停止录制后先保存或丢弃该 episode，才能开始下一段录制。
 
 ```bash
 ur7e-vla collect-demo --config config.yaml --task "pick cube" --execute

@@ -28,6 +28,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--initial-state-episode", help="select an episode instead of the nearest state")
     run.add_argument("--inference-mode", choices=["synchronous", "asynchronous"])
     run.add_argument("--async-merge-mode", choices=["replace", "weighted_blend", "guard"])
+    gui = sub.add_parser("vla-gui", help="interactive GUI for one live VLA task")
+    gui.add_argument("--config", default="config.yaml")
+    gui.add_argument("--task", default="", help="initial task text; it can be edited in the window")
+    gui.add_argument("--execute", action="store_true", help="actually command UR7e and gripper")
     sequence = sub.add_parser("run-sequence", help="run bounded VLA task prompts in order")
     sequence.add_argument("--config", default="config.yaml")
     sequence.add_argument(
@@ -57,7 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("list-cameras", help="probe local OpenCV/UVC camera indices")
     demo = sub.add_parser("collect-demo", help="record Pika Sense demonstrations into a LeRobot dataset")
     demo.add_argument("--config", default="config.yaml")
-    demo.add_argument("--task", required=True, help="natural-language task, for example: pick cube")
+    demo.add_argument(
+        "--task",
+        default="",
+        help="optional initial task text; it can also be entered in the collection window",
+    )
     demo.add_argument("--demo-root", help="override local LeRobot demo search/create root")
     demo.add_argument("--execute", action="store_true", help="enable physical UR7e path replay")
     calibrate = sub.add_parser("calibrate-demo", help="calibrate absolute Pika Sensor pose to the UR TCP")
@@ -80,6 +88,13 @@ def main() -> None:
             cfg.demo.root = args.demo_root
         cfg.validate()
         launch_demo_gui(cfg, args.task, args.execute)
+        return
+    if args.command == "vla-gui":
+        from .vla_gui import launch_vla_gui
+
+        cfg = load_config(args.config)
+        cfg.validate()
+        launch_vla_gui(cfg, args.task, args.execute)
         return
     if args.command == "calibrate-demo":
         from .demo_collection import calibrate_demo_sensor_to_tcp
